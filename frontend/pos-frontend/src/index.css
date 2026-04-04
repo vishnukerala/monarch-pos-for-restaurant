@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+}
+
+@media (min-width: 768px) {
+  .app-shell {
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  .app-shell-main {
+    height: 100vh;
+    overflow-y: auto;
+  }
+}
+
+@media (max-height: 900px) {
+  html {
+    font-size: 14px;
+  }
+
+  .app-shell-main {
+    padding: 0.875rem !important;
+  }
+
+  .app-shell-sidebar {
+    padding: 1rem !important;
+  }
+
+  .app-shell-sidebar-title {
+    font-size: 1rem !important;
+  }
+}
+
+@media (max-height: 780px) {
+  html {
+    font-size: 13px;
+  }
+
+  .app-shell-main {
+    padding: 0.75rem !important;
+  }
+
+  .app-shell-main > * + * {
+    margin-top: 0.75rem !important;
+  }
+
+  .app-shell-sidebar {
+    padding: 0.875rem !important;
+  }
+
+  .app-shell-sidebar-scroll {
+    gap: 1rem !important;
+  }
+}
+
+@media (max-height: 680px) {
+  html {
+    font-size: 12px;
+  }
+
+  .app-shell-main {
+    padding: 0.625rem !important;
+  }
+
+  .app-shell-main > * + * {
+    margin-top: 0.625rem !important;
+  }
+}
