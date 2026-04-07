@@ -94,6 +94,23 @@ You can either:
 1. clone the repository
 2. or download the packaged client zip from the release/client folder prepared for deployment
 
+## Client Package Download
+
+If the user only needs the ready-to-run build package and does not need the source setup, download this file:
+
+`https://github.com/vishnukerala/monarch-pos-for-restaurant/blob/main/release/pos-system-client.zip`
+
+Steps:
+
+1. Download `pos-system-client.zip`
+2. Extract the ZIP
+3. Open the extracted folder
+4. Run the install script
+5. Run the start script
+
+This client package is for ready use on the client machine.
+It is not necessary to build the frontend or run the source code manually for normal client installation.
+
 ### Clone From Git
 
 ```bash
@@ -108,6 +125,19 @@ cd monarch-pos-for-restaurant
 3. Click `Download ZIP`.
 4. Extract the ZIP.
 5. Open the extracted project folder.
+
+### Download Ready Client ZIP From Repository
+
+If you want the packaged client build directly, open:
+
+`https://github.com/vishnukerala/monarch-pos-for-restaurant/blob/main/release/pos-system-client.zip`
+
+Then:
+
+1. download the file
+2. extract it
+3. run install
+4. start MONARCH POS
 
 ## Easy Install
 
