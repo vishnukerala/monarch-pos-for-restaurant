@@ -963,6 +963,10 @@ def _build_report_document(
                 "label": "Cash",
                 "value": _format_money(sales_summary.get("total_cash_paid")),
             },
+            {
+                "label": "Expense",
+                "value": _format_money(sales_summary.get("total_expense")),
+            },
         ]
         sections.extend(
             [

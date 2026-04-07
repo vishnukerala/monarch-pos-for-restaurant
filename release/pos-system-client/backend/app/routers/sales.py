@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.schemas.sales import (
     SaleBillDeleteRequest,
+    SaleBillPaymentMethodUpdateRequest,
     SaleBillUpdateRequest,
     SaleCashClosingSaveRequest,
     SaleCheckoutRequest,
@@ -30,6 +31,7 @@ from app.services.sales import (
     delete_billed_sale,
     update_sale_expense,
     update_billed_sale,
+    update_billed_sale_payment_method,
 )
 
 router = APIRouter(prefix="/sales")
@@ -116,6 +118,14 @@ def read_billed_sale_history(bill_id: int):
 @router.put("/bills/{bill_id}")
 def update_bill(bill_id: int, payload: SaleBillUpdateRequest):
     return update_billed_sale(bill_id, payload)
+
+
+@router.put("/bills/{bill_id}/payment-method")
+def update_bill_payment_method(
+    bill_id: int,
+    payload: SaleBillPaymentMethodUpdateRequest,
+):
+    return update_billed_sale_payment_method(bill_id, payload)
 
 
 @router.delete("/bills/{bill_id}")

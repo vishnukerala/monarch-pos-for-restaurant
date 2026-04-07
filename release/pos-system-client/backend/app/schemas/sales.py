@@ -42,6 +42,13 @@ class SaleBillUpdateRequest(BaseModel):
     actor_role: str | None = None
 
 
+class SaleBillPaymentMethodUpdateRequest(BaseModel):
+    payment_method: str = "CASH"
+    actor_user_id: int | None = None
+    actor_username: str | None = None
+    actor_role: str | None = None
+
+
 class SaleBillDeleteRequest(BaseModel):
     actor_user_id: int | None = None
     actor_username: str | None = None

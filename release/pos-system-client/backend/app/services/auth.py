@@ -22,9 +22,16 @@ def login_user(data: LoginRequest):
     try:
         db = get_db()
         cursor = db.cursor(dictionary=True)
+        username = data.username.strip()
+        password = data.password.strip()
 
-        query = "SELECT * FROM users WHERE username=%s AND password=%s"
-        cursor.execute(query, (data.username.strip(), data.password.strip()))
+        query = """
+            SELECT id, username, role
+            FROM users
+            WHERE username=%s AND password=%s
+            LIMIT 1
+        """
+        cursor.execute(query, (username, password))
         user = cursor.fetchone()
 
         if user:

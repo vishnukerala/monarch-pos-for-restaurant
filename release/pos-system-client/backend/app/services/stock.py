@@ -10,6 +10,7 @@ from app.core.config import BASE_DIR
 from app.db.mysql import get_db
 from app.schemas.stock import (
     StockCategoryCreate,
+    StockCategoryUpdate,
     StockLoginBrandingUpdate,
     StockMovementCreate,
     StockProductCostUpdate,
@@ -35,6 +36,21 @@ VALID_RECEIPT_ALIGNMENTS = {"LEFT", "CENTER", "RIGHT"}
 VALID_RECEIPT_LOGO_SIZES = {"SMALL", "MEDIUM", "LARGE"}
 VALID_RECEIPT_ITEM_LAYOUTS = {"COMPACT", "DETAILED"}
 DEFAULT_PRODUCT_DISPLAY_POSITION = 9999
+DEFAULT_CATEGORY_DISPLAY_POSITION = 9999
+_stock_tables_ready = False
+
+
+def _index_exists(cursor, table_name: str, index_name: str) -> bool:
+    cursor.execute(f"SHOW INDEX FROM {table_name} WHERE Key_name = %s", (index_name,))
+    rows = cursor.fetchall()
+    return bool(rows)
+
+
+def _ensure_named_index(cursor, table_name: str, index_name: str, columns: str):
+    if _index_exists(cursor, table_name, index_name):
+        return
+
+    cursor.execute(f"CREATE INDEX {index_name} ON {table_name} ({columns})")
 
 
 def _default_receipt_settings():
@@ -70,14 +86,20 @@ def _default_login_branding_settings():
 
 
 def _ensure_stock_tables(db):
-    cursor = db.cursor()
+    global _stock_tables_ready
+
+    if _stock_tables_ready:
+        return
+
+    cursor = db.cursor(buffered=True)
 
     try:
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS stock_categories (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL
+                name VARCHAR(255) NOT NULL,
+                display_position INT NOT NULL DEFAULT 9999
             )
             """
         )
@@ -169,6 +191,8 @@ def _ensure_stock_tables(db):
         has_current_stock_qty = cursor.fetchone() is not None
         cursor.execute("SHOW COLUMNS FROM stock_products LIKE 'display_position'")
         has_display_position = cursor.fetchone() is not None
+        cursor.execute("SHOW COLUMNS FROM stock_categories LIKE 'display_position'")
+        has_category_display_position = cursor.fetchone() is not None
 
         cursor.execute("SHOW COLUMNS FROM stock_printers")
         printer_columns = {row[0] for row in cursor.fetchall()}
@@ -411,7 +435,47 @@ def _ensure_stock_tables(db):
                 """
             )
 
+        if not has_category_display_position:
+            cursor.execute(
+                f"""
+                ALTER TABLE stock_categories
+                ADD COLUMN display_position INT NOT NULL DEFAULT {DEFAULT_CATEGORY_DISPLAY_POSITION}
+                """
+            )
+
+        _ensure_named_index(
+            cursor,
+            "stock_categories",
+            "idx_stock_categories_name",
+            "name",
+        )
+        _ensure_named_index(
+            cursor,
+            "stock_categories",
+            "idx_stock_categories_position_name",
+            "display_position, name",
+        )
+        _ensure_named_index(
+            cursor,
+            "stock_products",
+            "idx_stock_products_category_position_name",
+            "category_id, display_position, name",
+        )
+        _ensure_named_index(
+            cursor,
+            "stock_products",
+            "idx_stock_products_printer_id",
+            "printer_id",
+        )
+        _ensure_named_index(
+            cursor,
+            "stock_movements",
+            "idx_stock_movements_product_created_at",
+            "product_id, created_at",
+        )
+
         db.commit()
+        _stock_tables_ready = True
     finally:
         cursor.close()
 
@@ -536,6 +600,28 @@ def _normalize_product_display_position(value):
     return position
 
 
+def _normalize_category_display_position(value):
+    if value in {None, ""}:
+        return DEFAULT_CATEGORY_DISPLAY_POSITION
+
+    try:
+        position = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Enter valid category position") from exc
+
+    if position < 1:
+        raise ValueError("Category position must be 1 or more") from None
+
+    return position
+
+
+def _serialize_category_row(category: dict):
+    category["display_position"] = int(
+        category.get("display_position") or DEFAULT_CATEGORY_DISPLAY_POSITION
+    )
+    return category
+
+
 def _serialize_product_row(product: dict):
     product["sale_price"] = _decimal_to_float(product["sale_price"])
     product["cost_price"] = _decimal_to_float(product.get("cost_price")) or 0
@@ -543,6 +629,9 @@ def _serialize_product_row(product: dict):
     product["current_stock_qty"] = _decimal_to_float(product["current_stock_qty"]) or 0
     product["display_position"] = int(
         product.get("display_position") or DEFAULT_PRODUCT_DISPLAY_POSITION
+    )
+    product["category_display_position"] = int(
+        product.get("category_display_position") or DEFAULT_CATEGORY_DISPLAY_POSITION
     )
     return product
 
@@ -566,8 +655,14 @@ def get_categories():
     cursor = db.cursor(dictionary=True)
 
     try:
-        cursor.execute("SELECT id, name FROM stock_categories ORDER BY name")
-        return cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT id, name, display_position
+            FROM stock_categories
+            ORDER BY display_position, name
+            """
+        )
+        return [_serialize_category_row(category) for category in cursor.fetchall()]
     finally:
         cursor.close()
         db.close()
@@ -580,6 +675,7 @@ def add_category(data: StockCategoryCreate):
 
     try:
         name = data.name.strip()
+        display_position = _normalize_category_display_position(data.display_position)
 
         if not name:
             return {"error": "Enter category name"}
@@ -587,10 +683,57 @@ def add_category(data: StockCategoryCreate):
         if _name_exists(cursor, "stock_categories", name):
             return {"error": "Category already exists"}
 
-        cursor.execute("INSERT INTO stock_categories (name) VALUES (%s)", (name,))
+        cursor.execute(
+            "INSERT INTO stock_categories (name, display_position) VALUES (%s, %s)",
+            (name, display_position),
+        )
         db.commit()
 
         return {"message": "Category added"}
+    except ValueError as exc:
+        return {"error": str(exc)}
+    finally:
+        cursor.close()
+        db.close()
+
+
+def update_category(category_id: int, data: StockCategoryUpdate):
+    db = get_db()
+    _ensure_stock_tables(db)
+    cursor = db.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id FROM stock_categories WHERE id=%s", (category_id,))
+        category = cursor.fetchone()
+
+        if not category:
+            return {"error": "Category not found"}
+
+        name = data.name.strip()
+        display_position = _normalize_category_display_position(data.display_position)
+
+        if not name:
+            return {"error": "Enter category name"}
+
+        cursor.close()
+        cursor = db.cursor()
+
+        if _name_exists(cursor, "stock_categories", name, category_id):
+            return {"error": "Category already exists"}
+
+        cursor.execute(
+            """
+            UPDATE stock_categories
+            SET name=%s, display_position=%s
+            WHERE id=%s
+            """,
+            (name, display_position, category_id),
+        )
+        db.commit()
+
+        return {"message": "Category updated"}
+    except ValueError as exc:
+        return {"error": str(exc)}
     finally:
         cursor.close()
         db.close()
@@ -1346,6 +1489,7 @@ def get_products():
                 p.category_id,
                 p.display_position,
                 c.name AS category_name,
+                c.display_position AS category_display_position,
                 p.sale_price,
                 p.cost_price,
                 p.current_stock_qty,
@@ -1358,7 +1502,7 @@ def get_products():
             FROM stock_products p
             JOIN stock_categories c ON c.id = p.category_id
             LEFT JOIN stock_printers pr ON pr.id = p.printer_id
-            ORDER BY c.name, p.display_position, p.name
+            ORDER BY c.display_position, c.name, p.display_position, p.name
             """
         )
         return [_serialize_product_row(product) for product in cursor.fetchall()]

@@ -95,8 +95,37 @@ function getProductDisplayPosition(value) {
   return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
 }
 
+function getCategoryDisplayPosition(value) {
+  const parsedValue = Number(value);
+  return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
+}
+
+function sortCategoriesByPosition(items) {
+  return [...(items || [])].sort((leftCategory, rightCategory) => {
+    const positionComparison =
+      getCategoryDisplayPosition(leftCategory.display_position) -
+      getCategoryDisplayPosition(rightCategory.display_position);
+
+    if (positionComparison !== 0) {
+      return positionComparison;
+    }
+
+    return String(leftCategory.name || "").localeCompare(
+      String(rightCategory.name || ""),
+    );
+  });
+}
+
 function sortProductsByCategoryAndPosition(items) {
   return [...(items || [])].sort((leftItem, rightItem) => {
+    const categoryPositionComparison =
+      getCategoryDisplayPosition(leftItem.category_display_position) -
+      getCategoryDisplayPosition(rightItem.category_display_position);
+
+    if (categoryPositionComparison !== 0) {
+      return categoryPositionComparison;
+    }
+
     const categoryComparison = String(leftItem.category_name || "").localeCompare(
       String(rightItem.category_name || ""),
     );
@@ -2297,9 +2326,11 @@ function Stock() {
   const [productSearch, setProductSearch] = useState("");
   const [productCategoryFilter, setProductCategoryFilter] = useState("ALL");
   const [editingProductId, setEditingProductId] = useState(null);
+  const [editingCategoryId, setEditingCategoryId] = useState(null);
   const [productCostDrafts, setProductCostDrafts] = useState({});
   const [movements, setMovements] = useState([]);
   const [categoryName, setCategoryName] = useState("");
+  const [categoryPosition, setCategoryPosition] = useState("");
   const [productForm, setProductForm] = useState({
     name: "",
     category_id: "",
@@ -2341,7 +2372,7 @@ function Stock() {
 
   const loadCategories = async () => {
     const res = await axios.get(`${API}/stock/categories`);
-    setCategories(res.data);
+    setCategories(sortCategoriesByPosition(res.data));
   };
 
   const loadPrinters = async () => {
@@ -2400,27 +2431,55 @@ function Stock() {
     });
   }, [stockTab, editingProductId]);
 
-  const addCategory = async () => {
+  const clearCategoryForm = () => {
+    setEditingCategoryId(null);
+    setCategoryName("");
+    setCategoryPosition("");
+  };
+
+  const startCategoryEdit = (category) => {
+    setEditingCategoryId(category.id);
+    setCategoryName(category.name || "");
+    setCategoryPosition(
+      Number(category.display_position) >= 1 &&
+        Number(category.display_position) < 9999
+        ? String(category.display_position)
+        : "",
+    );
+    setStockTab("categories");
+  };
+
+  const saveCategory = async () => {
     if (!categoryName.trim()) {
       alert("Enter category name");
       return;
     }
 
     try {
-      const res = await axios.post(`${API}/stock/categories`, {
+      const payload = {
         name: categoryName,
-      });
+        display_position:
+          categoryPosition === "" ? null : Number(categoryPosition),
+      };
+      const res = editingCategoryId
+        ? await axios.put(`${API}/stock/categories/${editingCategoryId}`, payload)
+        : await axios.post(`${API}/stock/categories`, payload);
 
       if (res.data.error) {
         alert(res.data.error);
         return;
       }
 
-      setCategoryName("");
-      loadCategories();
+      clearCategoryForm();
+      await loadCategories();
     } catch (error) {
       console.error(error);
-      alert("Failed to add category");
+      alert(
+        getRequestErrorMessage(
+          error,
+          editingCategoryId ? "Failed to update category" : "Failed to add category",
+        ),
+      );
     }
   };
 
@@ -2437,7 +2496,10 @@ function Stock() {
         return;
       }
 
-      loadCategories();
+      if (editingCategoryId === categoryId) {
+        clearCategoryForm();
+      }
+      await loadCategories();
     } catch (error) {
       console.error(error);
       alert("Failed to delete category");
@@ -2688,7 +2750,7 @@ function Stock() {
           <div className="rounded-2xl bg-white p-5 shadow-sm">
             <h2 className="text-xl font-semibold text-slate-900">Categories</h2>
             <p className="mt-1 text-sm text-slate-500">
-              Add and delete item categories for stock.
+              Add, reorder, and edit item categories for stock.
             </p>
 
             <div className="mt-4 flex flex-wrap gap-2">
@@ -2698,12 +2760,29 @@ function Stock() {
                 onChange={(e) => setCategoryName(e.target.value)}
                 className="min-w-[240px] rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
               />
+              <input
+                type="number"
+                min="1"
+                step="1"
+                placeholder="Category Position (Optional)"
+                value={categoryPosition}
+                onChange={(e) => setCategoryPosition(e.target.value)}
+                className="w-56 rounded-lg border border-slate-300 px-3 py-2 outline-none focus:border-blue-500"
+              />
               <button
-                onClick={addCategory}
+                onClick={saveCategory}
                 className="rounded-lg bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"
               >
-                Add Category
+                {editingCategoryId ? "Save Category" : "Add Category"}
               </button>
+              {editingCategoryId && (
+                <button
+                  onClick={clearCategoryForm}
+                  className="rounded-lg bg-slate-200 px-4 py-2 text-slate-700 hover:bg-slate-300"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
           </div>
 
@@ -2713,13 +2792,29 @@ function Stock() {
                 key={category.id}
                 className="flex items-center justify-between rounded-2xl bg-white p-4 shadow-sm"
               >
-                <div className="font-semibold text-slate-900">{category.name}</div>
-                <button
-                  onClick={() => deleteCategory(category.id)}
-                  className="rounded bg-red-500 px-3 py-2 text-white hover:bg-red-600"
-                >
-                  Delete
-                </button>
+                <div>
+                  <div className="font-semibold text-slate-900">{category.name}</div>
+                  <div className="mt-1 text-sm text-slate-500">
+                    Position{" "}
+                    {getCategoryDisplayPosition(category.display_position) >= 9999
+                      ? "-"
+                      : getCategoryDisplayPosition(category.display_position)}
+                  </div>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => startCategoryEdit(category)}
+                    className="rounded bg-blue-500 px-3 py-2 text-white hover:bg-blue-600"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => deleteCategory(category.id)}
+                    className="rounded bg-red-500 px-3 py-2 text-white hover:bg-red-600"
+                  >
+                    Delete
+                  </button>
+                </div>
               </div>
             ))}
           </div>

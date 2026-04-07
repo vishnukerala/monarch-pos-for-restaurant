@@ -54,6 +54,8 @@ function formatPaymentMethod(value) {
   return value;
 }
 
+const QUICK_PAYMENT_METHOD_OPTIONS = ["CASH", "CARD", "UPI"];
+
 function formatBillChangeState(value) {
   const normalizedValue = String(value || "ACTIVE")
     .trim()
@@ -334,6 +336,8 @@ function getResolvedPaymentMethod(cashPaid, cardPaid, upiPaid) {
   return activeMethods[0] || "CASH";
 }
 
+const EDITOR_PAYMENT_METHOD_OPTIONS = ["CASH", "CARD", "UPI", "MIXED"];
+
 function createEditorItem(item = {}) {
   return {
     clientKey:
@@ -376,6 +380,8 @@ export default function EditSalesPage() {
   const [bills, setBills] = useState([]);
   const [loadingBills, setLoadingBills] = useState(true);
   const [billsUnavailable, setBillsUnavailable] = useState(false);
+  const [billPaymentMethodDrafts, setBillPaymentMethodDrafts] = useState({});
+  const [changingPaymentBillId, setChangingPaymentBillId] = useState(null);
   const [dateFrom, setDateFrom] = useState(
     isAdminView ? "" : isReprintOnlyView ? "" : todayDate,
   );
@@ -463,6 +469,7 @@ export default function EditSalesPage() {
         },
       });
       setBills(Array.isArray(response.data) ? response.data : []);
+      setBillPaymentMethodDrafts({});
       setBillsUnavailable(false);
     } catch (error) {
       console.error(error);
@@ -686,6 +693,13 @@ export default function EditSalesPage() {
           Number(bill.card_paid || 0) > 0 ? String(bill.card_paid) : "",
         upiPaidInput:
           Number(bill.upi_paid || 0) > 0 ? String(bill.upi_paid) : "",
+        paymentMethodInput:
+          bill.payment_method ||
+          getResolvedPaymentMethod(
+            Number(bill.cash_paid || 0),
+            Number(bill.card_paid || 0),
+            Number(bill.upi_paid || 0),
+          ),
       });
       setSelectedEditorItemId(editorItems[0]?.clientKey || null);
     } catch (error) {
@@ -758,6 +772,47 @@ export default function EditSalesPage() {
     }
   };
 
+  const getBillPaymentMethodDraft = (bill) =>
+    billPaymentMethodDrafts[bill.id] || bill.payment_method || "CASH";
+
+  const changeBillPaymentMethod = async (bill) => {
+    if (!canEditBills || !bill || bill.is_deleted) {
+      return;
+    }
+
+    const nextPaymentMethod = getBillPaymentMethodDraft(bill);
+
+    if (!nextPaymentMethod || nextPaymentMethod === bill.payment_method) {
+      return;
+    }
+
+    try {
+      setChangingPaymentBillId(bill.id);
+      const response = await axios.put(
+        `${API}/sales/bills/${bill.id}/payment-method`,
+        {
+          payment_method: nextPaymentMethod,
+          actor_user_id: currentUser.id,
+          actor_username: currentUser.username,
+          actor_role: currentUser.role,
+        },
+      );
+
+      if (response.data?.error) {
+        alert(response.data.error);
+        return;
+      }
+
+      await loadBills();
+      alert("Payment method updated");
+    } catch (error) {
+      console.error(error);
+      alert(getErrorMessage(error, "Failed to change payment method"));
+    } finally {
+      setChangingPaymentBillId(null);
+    }
+  };
+
   const updateEditorItem = (clientKey, field, value) => {
     setEditingBill((currentValue) => {
       if (!currentValue) {
@@ -797,6 +852,63 @@ export default function EditSalesPage() {
     setEditingBill((currentValue) =>
       currentValue ? { ...currentValue, [field]: value } : currentValue,
     );
+  };
+
+  const setEditorPaymentMethod = (nextMethod) => {
+    const normalizedMethod = String(nextMethod || "CASH")
+      .trim()
+      .toUpperCase();
+
+    setEditingBill((currentValue) => {
+      if (!currentValue) {
+        return currentValue;
+      }
+
+      const normalizedTotalPaid = Number(
+        (
+          normalizeAmountInput(currentValue.cashPaidInput) +
+          normalizeAmountInput(currentValue.cardPaidInput) +
+          normalizeAmountInput(currentValue.upiPaidInput)
+        ).toFixed(2),
+      );
+      const paymentAmountText =
+        normalizedTotalPaid > 0 ? String(normalizedTotalPaid) : "";
+
+      if (normalizedMethod === "CASH") {
+        return {
+          ...currentValue,
+          paymentMethodInput: "CASH",
+          cashPaidInput: paymentAmountText,
+          cardPaidInput: "",
+          upiPaidInput: "",
+        };
+      }
+
+      if (normalizedMethod === "CARD") {
+        return {
+          ...currentValue,
+          paymentMethodInput: "CARD",
+          cashPaidInput: "",
+          cardPaidInput: paymentAmountText,
+          upiPaidInput: "",
+        };
+      }
+
+      if (normalizedMethod === "UPI") {
+        return {
+          ...currentValue,
+          paymentMethodInput: "UPI",
+          cashPaidInput: "",
+          cardPaidInput: "",
+          upiPaidInput: paymentAmountText,
+        };
+      }
+
+      return {
+        ...currentValue,
+        paymentMethodInput: "MIXED",
+      };
+    });
   };
 
   const addCustomEditorItem = () => {
@@ -928,11 +1040,13 @@ export default function EditSalesPage() {
     (editorCashPaid + editorCardPaid + editorUpiPaid).toFixed(2),
   );
   const editorBalance = Number((editorTotalPaid - editorSubtotal).toFixed(2));
-  const editorPaymentMethod = getResolvedPaymentMethod(
+  const editorResolvedPaymentMethod = getResolvedPaymentMethod(
     editorCashPaid,
     editorCardPaid,
     editorUpiPaid,
   );
+  const editorPaymentMethod =
+    editingBill?.paymentMethodInput || editorResolvedPaymentMethod;
   const editorBusy = savingBill || deletingBill;
 
   const saveBillChanges = async () => {
@@ -1261,11 +1375,45 @@ export default function EditSalesPage() {
                     </span>
                   </div>
                 )}
-                <div>{formatPaymentMethod(bill.payment_method)}</div>
+                <div>
+                  {canEditBills && !bill.is_deleted ? (
+                    <select
+                      value={getBillPaymentMethodDraft(bill)}
+                      onChange={(event) =>
+                        setBillPaymentMethodDrafts((currentValue) => ({
+                          ...currentValue,
+                          [bill.id]: event.target.value,
+                        }))
+                      }
+                      disabled={changingPaymentBillId === bill.id}
+                      className="w-full rounded-lg border border-slate-300 px-2 py-2 text-sm outline-none focus:border-sky-500 disabled:cursor-not-allowed disabled:bg-slate-100"
+                    >
+                      {QUICK_PAYMENT_METHOD_OPTIONS.map((method) => (
+                        <option key={method} value={method}>
+                          {formatPaymentMethod(method)}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    formatPaymentMethod(bill.payment_method)
+                  )}
+                </div>
                 <div className="text-right font-semibold text-slate-900">
                   {formatMoney(bill.total)}
                 </div>
                 <div className="flex flex-wrap justify-end gap-2">
+                  {canEditBills && !bill.is_deleted && (
+                    <button
+                      onClick={() => void changeBillPaymentMethod(bill)}
+                      disabled={
+                        changingPaymentBillId === bill.id ||
+                        getBillPaymentMethodDraft(bill) === bill.payment_method
+                      }
+                      className="rounded-lg bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-700 hover:bg-amber-100 disabled:cursor-not-allowed disabled:bg-amber-50 disabled:text-amber-300"
+                    >
+                      {changingPaymentBillId === bill.id ? "Changing..." : "Change"}
+                    </button>
+                  )}
                   {isAdminView && (
                     <button
                       onClick={() => openBillHistory(bill)}
@@ -1830,8 +1978,21 @@ export default function EditSalesPage() {
                           <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                             Payment Method
                           </div>
-                          <div className="mt-1 text-lg font-bold text-slate-900">
-                            {formatPaymentMethod(editorPaymentMethod)}
+                          <select
+                            value={editorPaymentMethod}
+                            onChange={(event) =>
+                              setEditorPaymentMethod(event.target.value)
+                            }
+                            className="mt-2 block w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 outline-none focus:border-sky-500"
+                          >
+                            {EDITOR_PAYMENT_METHOD_OPTIONS.map((method) => (
+                              <option key={method} value={method}>
+                                {formatPaymentMethod(method)}
+                              </option>
+                            ))}
+                          </select>
+                          <div className="mt-2 text-xs font-medium text-slate-500">
+                            Applied: {formatPaymentMethod(editorResolvedPaymentMethod)}
                           </div>
                         </div>
 

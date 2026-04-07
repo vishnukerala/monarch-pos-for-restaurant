@@ -59,6 +59,7 @@ DEFAULT_WAITER_PERMISSIONS = {
 }
 
 _access_control_table_ready = False
+_cached_role_permission_overrides = None
 
 
 def _normalize_role(value: str):
@@ -186,6 +187,14 @@ def _ensure_access_control_table(db):
 
 
 def get_role_permission_overrides():
+    global _cached_role_permission_overrides
+
+    if _cached_role_permission_overrides is not None:
+        return {
+            role: dict(permissions)
+            for role, permissions in _cached_role_permission_overrides.items()
+        }
+
     db = get_db()
     cursor = None
 
@@ -252,7 +261,15 @@ def get_role_permission_overrides():
 
             db.commit()
 
-        return permission_overrides
+        _cached_role_permission_overrides = {
+            role: dict(permissions)
+            for role, permissions in permission_overrides.items()
+        }
+
+        return {
+            role: dict(permissions)
+            for role, permissions in permission_overrides.items()
+        }
     finally:
         if cursor is not None:
             cursor.close()
@@ -260,6 +277,8 @@ def get_role_permission_overrides():
 
 
 def save_role_permission_overrides(permission_overrides):
+    global _cached_role_permission_overrides
+
     db = get_db()
     cursor = None
 
@@ -278,6 +297,10 @@ def save_role_permission_overrides(permission_overrides):
             )
 
         db.commit()
+        _cached_role_permission_overrides = {
+            role: dict(permissions)
+            for role, permissions in sanitized_overrides.items()
+        }
         return {"permission_overrides": sanitized_overrides}
     finally:
         if cursor is not None:
@@ -286,6 +309,8 @@ def save_role_permission_overrides(permission_overrides):
 
 
 def clear_role_permission_overrides():
+    global _cached_role_permission_overrides
+
     db = get_db()
     cursor = None
 
@@ -300,6 +325,7 @@ def clear_role_permission_overrides():
             MANAGED_ROLES,
         )
         db.commit()
+        _cached_role_permission_overrides = {}
         return {"permission_overrides": {}}
     finally:
         if cursor is not None:

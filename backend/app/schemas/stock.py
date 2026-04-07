@@ -3,6 +3,12 @@ from pydantic import BaseModel
 
 class StockCategoryCreate(BaseModel):
     name: str
+    display_position: int | None = None
+
+
+class StockCategoryUpdate(BaseModel):
+    name: str
+    display_position: int | None = None
 
 
 class StockPrinterCreate(BaseModel):

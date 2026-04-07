@@ -56,8 +56,38 @@ function getProductDisplayPosition(product) {
   return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
 }
 
+function getCategoryDisplayPosition(product) {
+  const parsedValue = Number(product?.category_display_position);
+  return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
+}
+
+function getOrderedCategoryNames(items) {
+  const seenNames = new Set();
+  const orderedNames = [];
+
+  for (const item of items || []) {
+    const categoryName = String(item?.category_name || "").trim();
+
+    if (!categoryName || seenNames.has(categoryName)) {
+      continue;
+    }
+
+    seenNames.add(categoryName);
+    orderedNames.push(categoryName);
+  }
+
+  return orderedNames;
+}
+
 function sortProductsForDisplay(items) {
   return [...(items || [])].sort((leftItem, rightItem) => {
+    const categoryPositionComparison =
+      getCategoryDisplayPosition(leftItem) - getCategoryDisplayPosition(rightItem);
+
+    if (categoryPositionComparison !== 0) {
+      return categoryPositionComparison;
+    }
+
     const categoryComparison = String(leftItem.category_name || "").localeCompare(
       String(rightItem.category_name || ""),
     );
@@ -1189,8 +1219,31 @@ export default function BillingPage() {
   };
 
   useEffect(() => {
+    setCustomerPaidInput("");
+    setCashPaidInput("");
+    setCardPaidInput("");
+    setUpiPaidInput("");
+    setCategoryFilter("ALL");
     loadBillingData();
   }, [tableId]);
+
+  useEffect(() => {
+    const orderedCategories = getOrderedCategoryNames(products);
+
+    if (orderedCategories.length === 0) {
+      if (categoryFilter !== "ALL") {
+        setCategoryFilter("ALL");
+      }
+      return;
+    }
+
+    if (
+      categoryFilter === "ALL" ||
+      !orderedCategories.includes(categoryFilter)
+    ) {
+      setCategoryFilter(orderedCategories[0]);
+    }
+  }, [products, categoryFilter]);
 
   useEffect(() => {
     if (cart.length === 0) {
@@ -1211,11 +1264,7 @@ export default function BillingPage() {
 
   const deferredSearch = useDeferredValue(search);
   const normalizedProductSearch = deferredSearch.trim().toLowerCase();
-  const categories = [
-    "ALL",
-    ...new Set(products.map((product) => product.category_name).filter(Boolean)),
-  ];
-  const visibleCategories = categories.filter((category) => category !== "ALL");
+  const visibleCategories = getOrderedCategoryNames(products);
 
   const filteredProducts = products.filter((product) => {
     const matchesSearch =
@@ -2374,7 +2423,7 @@ export default function BillingPage() {
       return;
     }
 
-    setCustomerPaidInput(cashPaidValue > 0 ? String(cashPaidValue) : "");
+    setCustomerPaidInput("");
     setCashPaidInput("");
     setCardPaidInput("");
     setUpiPaidInput("");
@@ -2811,30 +2860,30 @@ export default function BillingPage() {
             </div>
 
             <div className="shrink-0 border-t border-slate-300 bg-slate-50 px-3 py-2">
-              <div className="ml-auto w-full max-w-[21rem] rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 shadow-sm 2xl:max-w-[26rem]">
+              <div className="ml-auto w-full max-w-[27rem] rounded-lg border border-slate-300 bg-white px-4 py-3 shadow-sm 2xl:max-w-[32rem]">
                 <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-center sm:grid-cols-4 sm:gap-x-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                  <div className="text-sm font-semibold uppercase tracking-wide text-slate-600">
                     Subtotal
                   </div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                  <div className="text-sm font-semibold uppercase tracking-wide text-slate-600">
                     Due
                   </div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                  <div className="text-sm font-semibold uppercase tracking-wide text-slate-600">
                     Tax
                   </div>
-                  <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                  <div className="text-sm font-semibold uppercase tracking-wide text-slate-600">
                     Total
                   </div>
-                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm font-bold text-slate-900">
+                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-3 text-xl font-bold text-slate-900">
                     {formatMoney(subtotal)}
                   </div>
-                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm font-bold text-slate-900">
+                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-3 text-xl font-bold text-slate-900">
                     {formatMoney(calculatorBalanceAmount)}
                   </div>
-                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-sm font-bold text-slate-900">
+                  <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-3 text-xl font-bold text-slate-900">
                     {summaryTaxValue}
                   </div>
-                  <div className="rounded-md border border-slate-900 bg-slate-900 px-3 py-1.5 text-sm font-bold text-white">
+                  <div className="rounded-md border border-slate-900 bg-slate-900 px-3 py-3 text-xl font-bold text-white">
                     {formatMoney(subtotal)}
                   </div>
                 </div>
@@ -2972,11 +3021,7 @@ export default function BillingPage() {
                     {visibleCategories.map((category) => (
                       <button
                         key={category}
-                        onClick={() =>
-                          setCategoryFilter((currentValue) =>
-                            currentValue === category ? "ALL" : category,
-                          )
-                        }
+                        onClick={() => setCategoryFilter(category)}
                         className={`rounded-md px-2.5 py-1.5 text-sm font-medium whitespace-nowrap transition ${
                           categoryFilter === category
                             ? "bg-slate-800 text-white"

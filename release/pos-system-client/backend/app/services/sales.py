@@ -10,6 +10,7 @@ from decimal import Decimal
 
 from app.db.mysql import get_db
 from app.schemas.sales import (
+    SaleBillPaymentMethodUpdateRequest,
     SaleBillUpdateRequest,
     SaleCashClosingSaveRequest,
     SaleCheckoutRequest,
@@ -37,13 +38,26 @@ _RECEIPT_LOGO_DATA_PATTERN = re.compile(
 _sales_tables_ready = False
 
 
+def _index_exists(cursor, table_name: str, index_name: str) -> bool:
+    cursor.execute(f"SHOW INDEX FROM {table_name} WHERE Key_name = %s", (index_name,))
+    rows = cursor.fetchall()
+    return bool(rows)
+
+
+def _ensure_named_index(cursor, table_name: str, index_name: str, columns: str):
+    if _index_exists(cursor, table_name, index_name):
+        return
+
+    cursor.execute(f"CREATE INDEX {index_name} ON {table_name} ({columns})")
+
+
 def _ensure_sales_tables(db):
     global _sales_tables_ready
 
     if _sales_tables_ready:
         return
 
-    cursor = db.cursor()
+    cursor = db.cursor(buffered=True)
 
     try:
         cursor.execute(
@@ -566,6 +580,43 @@ def _ensure_sales_tables(db):
                     ON UPDATE CURRENT_TIMESTAMP
                 """
             )
+
+        _ensure_named_index(
+            cursor,
+            "sale_orders",
+            "idx_sale_orders_updated_at",
+            "updated_at",
+        )
+        _ensure_named_index(
+            cursor,
+            "sale_order_items",
+            "idx_sale_order_items_sale_id",
+            "sale_id",
+        )
+        _ensure_named_index(
+            cursor,
+            "sale_bills",
+            "idx_sale_bills_created_at",
+            "created_at",
+        )
+        _ensure_named_index(
+            cursor,
+            "sale_bills",
+            "idx_sale_bills_table_deleted_created_at",
+            "table_id, is_deleted, created_at",
+        )
+        _ensure_named_index(
+            cursor,
+            "sale_bill_items",
+            "idx_sale_bill_items_bill_id",
+            "bill_id",
+        )
+        _ensure_named_index(
+            cursor,
+            "sale_bill_history",
+            "idx_sale_bill_history_bill_id_changed_at",
+            "bill_id, changed_at",
+        )
         db.commit()
         _sales_tables_ready = True
     finally:
@@ -1729,7 +1780,10 @@ def _build_receipt_print_payload(cursor, bill: dict):
         for line in _format_receipt_item_rows(
             item.get("item_name"),
             item.get("qty"),
-            _decimal_to_float(item.get("unit_price")) or 0,
+            (_decimal_to_float(item.get("line_total")) or 0)
+            if item.get("line_total") is not None
+            else (_decimal_to_float(item.get("unit_price")) or 0)
+            * float(item.get("qty") or 0),
             wrap_name=receipt_settings.get("item_layout") == "DETAILED",
         ):
             payload.extend(_escpos_line(line))
@@ -3406,7 +3460,7 @@ def get_sale_for_table(table_id: int):
                     floor_name
                 FROM sale_bills
                 WHERE table_id=%s
-                  AND COALESCE(is_deleted, 0) = 0
+                  AND (is_deleted = 0 OR is_deleted IS NULL)
                 ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
@@ -4070,6 +4124,100 @@ def update_billed_sale(bill_id: int, payload: SaleBillUpdateRequest):
             actor_user_id=actor_user_id,
             actor_username=actor_username,
         )
+        db.commit()
+
+        return bill_snapshot
+    finally:
+        cursor.close()
+        db.close()
+
+
+def update_billed_sale_payment_method(
+    bill_id: int,
+    payload: SaleBillPaymentMethodUpdateRequest,
+):
+    db = get_db()
+    _ensure_sales_tables(db)
+    cursor = db.cursor(dictionary=True)
+
+    try:
+        bill_row = _read_bill_row(cursor, bill_id)
+
+        if not bill_row:
+            return {"error": "Bill not found"}
+
+        if bill_row["is_deleted"]:
+            return {"error": "Deleted bill cannot be edited"}
+
+        actor_role = _normalize_actor_role(getattr(payload, "actor_role", None))
+
+        bill_created_at = _parse_datetime_filter(
+            _serialize_datetime(bill_row.get("created_at"))
+        )
+
+        if (
+            bill_created_at
+            and not _is_admin_actor(actor_role)
+            and _is_cash_closed_row(
+                _read_cash_closing_row_for_date(cursor, bill_created_at.date()),
+            )
+        ):
+            return {
+                "error": (
+                    "Cash already closed for this bill date. Only admin can edit this bill now."
+                )
+            }
+
+        payment_method = _normalize_payment_method(
+            getattr(payload, "payment_method", None)
+        )
+
+        if payment_method == "MIXED":
+            return {"error": "Select Cash, Card, or UPI here"}
+
+        customer_paid = round(
+            _decimal_to_float(bill_row.get("customer_paid"))
+            or _decimal_to_float(bill_row.get("total"))
+            or 0,
+            2,
+        )
+        total = round(_decimal_to_float(bill_row.get("total")) or 0, 2)
+        cash_paid = customer_paid if payment_method == "CASH" else 0
+        card_paid = customer_paid if payment_method == "CARD" else 0
+        upi_paid = customer_paid if payment_method == "UPI" else 0
+        balance = round(customer_paid - total, 2)
+
+        cursor.close()
+        cursor = db.cursor()
+        cursor.execute(
+            """
+            UPDATE sale_bills
+            SET
+                customer_paid=%s,
+                cash_paid=%s,
+                card_paid=%s,
+                upi_paid=%s,
+                balance=%s,
+                payment_method=%s,
+                edited_at=NULL,
+                edited_by_user_id=NULL,
+                edited_by_username=NULL
+            WHERE id=%s
+            """,
+            (
+                customer_paid,
+                cash_paid,
+                card_paid,
+                upi_paid,
+                balance,
+                payment_method,
+                bill_id,
+            ),
+        )
+
+        cursor.close()
+        cursor = db.cursor(dictionary=True)
+        bill_snapshot = _get_billed_sale_from_cursor(cursor, bill_id)
         db.commit()
 
         return bill_snapshot

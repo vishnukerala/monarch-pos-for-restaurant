@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.schemas.stock import (
     StockCategoryCreate,
+    StockCategoryUpdate,
     StockLoginBrandingUpdate,
     StockMovementCreate,
     StockProductCostUpdate,
@@ -29,6 +30,7 @@ from app.services.stock import (
     update_product,
     update_product_cost_price,
     update_login_branding_settings,
+    update_category,
     update_receipt_settings,
     update_printer_options,
 )
@@ -44,6 +46,11 @@ def read_categories():
 @router.post("/categories")
 def create_category(data: StockCategoryCreate):
     return add_category(data)
+
+
+@router.put("/categories/{category_id}")
+def edit_category(category_id: int, data: StockCategoryUpdate):
+    return update_category(category_id, data)
 
 
 @router.delete("/categories/{category_id}")

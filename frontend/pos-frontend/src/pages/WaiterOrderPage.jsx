@@ -39,8 +39,38 @@ function getProductDisplayPosition(product) {
   return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
 }
 
+function getCategoryDisplayPosition(product) {
+  const parsedValue = Number(product?.category_display_position);
+  return Number.isFinite(parsedValue) && parsedValue >= 1 ? parsedValue : 9999;
+}
+
+function getOrderedCategoryNames(items) {
+  const seenNames = new Set();
+  const orderedNames = [];
+
+  for (const item of items || []) {
+    const categoryName = String(item?.category_name || "").trim();
+
+    if (!categoryName || seenNames.has(categoryName)) {
+      continue;
+    }
+
+    seenNames.add(categoryName);
+    orderedNames.push(categoryName);
+  }
+
+  return orderedNames;
+}
+
 function sortProductsForDisplay(items) {
   return [...(items || [])].sort((leftItem, rightItem) => {
+    const categoryPositionComparison =
+      getCategoryDisplayPosition(leftItem) - getCategoryDisplayPosition(rightItem);
+
+    if (categoryPositionComparison !== 0) {
+      return categoryPositionComparison;
+    }
+
     const categoryComparison = String(leftItem.category_name || "").localeCompare(
       String(rightItem.category_name || ""),
     );
@@ -561,15 +591,31 @@ export default function WaiterOrderPage() {
   };
 
   useEffect(() => {
+    setCategoryFilter("ALL");
     loadOrderData();
   }, [tableId]);
 
+  useEffect(() => {
+    const orderedCategories = getOrderedCategoryNames(products);
+
+    if (orderedCategories.length === 0) {
+      if (categoryFilter !== "ALL") {
+        setCategoryFilter("ALL");
+      }
+      return;
+    }
+
+    if (
+      categoryFilter === "ALL" ||
+      !orderedCategories.includes(categoryFilter)
+    ) {
+      setCategoryFilter(orderedCategories[0]);
+    }
+  }, [products, categoryFilter]);
+
   const deferredSearch = useDeferredValue(search);
   const normalizedProductSearch = deferredSearch.trim().toLowerCase();
-  const categories = [
-    "ALL",
-    ...new Set(products.map((product) => product.category_name).filter(Boolean)),
-  ];
+  const categories = ["ALL", ...getOrderedCategoryNames(products)];
 
   const filteredProducts = products.filter((product) => {
     const matchesSearch =
