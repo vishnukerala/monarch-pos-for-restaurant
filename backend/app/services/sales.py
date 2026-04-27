@@ -171,6 +171,9 @@ def _ensure_sales_tables(db):
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 business_date DATE NOT NULL,
                 cash_in_hand DECIMAL(10, 2) NOT NULL DEFAULT 0,
+                entered_cash DECIMAL(10, 2) NOT NULL DEFAULT 0,
+                entered_upi DECIMAL(10, 2) NOT NULL DEFAULT 0,
+                entered_card DECIMAL(10, 2) NOT NULL DEFAULT 0,
                 is_closed TINYINT(1) NOT NULL DEFAULT 0,
                 closed_at TIMESTAMP NULL DEFAULT NULL,
                 closed_by_user_id INT NULL,
@@ -513,6 +516,30 @@ def _ensure_sales_tables(db):
                 """
                 ALTER TABLE sale_cash_closing
                 ADD COLUMN cash_in_hand DECIMAL(10, 2) NOT NULL DEFAULT 0
+                """
+            )
+
+        if "entered_cash" not in existing_cash_closing_columns:
+            cursor.execute(
+                """
+                ALTER TABLE sale_cash_closing
+                ADD COLUMN entered_cash DECIMAL(10, 2) NOT NULL DEFAULT 0
+                """
+            )
+
+        if "entered_upi" not in existing_cash_closing_columns:
+            cursor.execute(
+                """
+                ALTER TABLE sale_cash_closing
+                ADD COLUMN entered_upi DECIMAL(10, 2) NOT NULL DEFAULT 0
+                """
+            )
+
+        if "entered_card" not in existing_cash_closing_columns:
+            cursor.execute(
+                """
+                ALTER TABLE sale_cash_closing
+                ADD COLUMN entered_card DECIMAL(10, 2) NOT NULL DEFAULT 0
                 """
             )
 
@@ -877,11 +904,25 @@ def _serialize_sale_expense_row(row):
     }
 
 
-def _serialize_sale_cash_closing_row(row):
+def _serialize_sale_cash_closing_row(
+    row,
+    total_sales: float | None = None,
+    total_expense: float | None = None,
+):
     if not row:
+        resolved_total_sales = round(float(total_sales or 0), 2)
+        resolved_total_expense = round(float(total_expense or 0), 2)
         return {
             "business_date": None,
             "cash_in_hand": 0,
+            "entered_cash": 0,
+            "entered_upi": 0,
+            "entered_card": 0,
+            "entered_total": 0,
+            "total_sales": resolved_total_sales,
+            "total_expense": resolved_total_expense,
+            "tally_difference": None,
+            "tally_status": "PENDING",
             "is_closed": False,
             "closed_at": None,
             "closed_by_user_id": None,
@@ -891,9 +932,42 @@ def _serialize_sale_cash_closing_row(row):
             "updated_at": None,
         }
 
+    entered_cash = round(_decimal_to_float(row.get("entered_cash")) or 0, 2)
+    entered_upi = round(_decimal_to_float(row.get("entered_upi")) or 0, 2)
+    entered_card = round(_decimal_to_float(row.get("entered_card")) or 0, 2)
+    if (
+        entered_cash <= 0
+        and entered_upi <= 0
+        and entered_card <= 0
+        and cash_in_hand > 0
+    ):
+        entered_cash = cash_in_hand
+    entered_total = round(entered_cash + entered_upi + entered_card, 2)
+    resolved_total_sales = round(float(total_sales or 0), 2)
+    resolved_total_expense = round(float(total_expense or 0), 2)
+    tally_difference = round(
+        resolved_total_sales - resolved_total_expense - entered_total,
+        2,
+    )
+
+    if abs(tally_difference) < 0.01:
+        tally_status = "TALLY"
+    elif tally_difference > 0:
+        tally_status = "MISSING"
+    else:
+        tally_status = "EXCESS"
+
     return {
         "business_date": _serialize_date(row.get("business_date")),
         "cash_in_hand": round(_decimal_to_float(row.get("cash_in_hand")) or 0, 2),
+        "entered_cash": entered_cash,
+        "entered_upi": entered_upi,
+        "entered_card": entered_card,
+        "entered_total": entered_total,
+        "total_sales": resolved_total_sales,
+        "total_expense": resolved_total_expense,
+        "tally_difference": tally_difference,
+        "tally_status": tally_status,
         "is_closed": bool(row.get("is_closed")),
         "closed_at": _serialize_datetime(row.get("closed_at")),
         "closed_by_user_id": _normalize_user_id(row.get("closed_by_user_id")),
@@ -910,6 +984,9 @@ def _read_cash_closing_row_for_date(cursor, business_date_value: date):
         SELECT
             business_date,
             cash_in_hand,
+            entered_cash,
+            entered_upi,
+            entered_card,
             is_closed,
             closed_at,
             closed_by_user_id,
@@ -923,6 +1000,20 @@ def _read_cash_closing_row_for_date(cursor, business_date_value: date):
         (business_date_value.isoformat(),),
     )
     return cursor.fetchone()
+
+
+def _get_total_sales_for_business_date(cursor, business_date_value: date):
+    cursor.execute(
+        """
+        SELECT COALESCE(SUM(total), 0) AS total_sales
+        FROM sale_bills
+        WHERE is_deleted = 0
+          AND DATE(created_at) = %s
+        """,
+        (business_date_value.isoformat(),),
+    )
+    row = cursor.fetchone() or {}
+    return round(_decimal_to_float(row.get("total_sales")) or 0, 2)
 
 
 def _is_cash_closed_row(row):
@@ -994,6 +1085,7 @@ def _format_print_datetime(value):
 
 def _default_receipt_settings():
     return {
+        "auto_kot_enabled": False,
         "title_enabled": False,
         "details_enabled": True,
         "title_font_size": 18,
@@ -1195,6 +1287,7 @@ def _read_receipt_settings_from_cursor(cursor):
     cursor.execute(
         """
         SELECT
+            auto_kot_enabled,
             title_enabled,
             details_enabled,
             title_font_size,
@@ -1224,6 +1317,7 @@ def _read_receipt_settings_from_cursor(cursor):
         return defaults
 
     return {
+        "auto_kot_enabled": bool(row.get("auto_kot_enabled")),
         "title_enabled": bool(row.get("title_enabled")),
         "details_enabled": bool(row.get("details_enabled")),
         "title_font_size": _normalize_receipt_font_size(
@@ -1273,6 +1367,10 @@ def _read_receipt_settings_from_cursor(cursor):
         ),
         "item_layout": _normalize_receipt_item_layout(row.get("item_layout")),
     }
+
+
+def _is_auto_kot_enabled(cursor):
+    return bool(_read_receipt_settings_from_cursor(cursor).get("auto_kot_enabled"))
 
 
 def _align_thermal_line(left, right="", width=RECEIPT_LINE_WIDTH):
@@ -2411,6 +2509,68 @@ def _get_sale_summary(cursor, table_id: int):
     }
 
 
+def _read_pending_kot_items(cursor, sale_id: int):
+    cursor.execute(
+        """
+        SELECT
+            id,
+            item_name,
+            qty,
+            tax_mode,
+            printer_name,
+            printer_target,
+            COALESCE(kot_printed_qty, 0) AS kot_printed_qty
+        FROM sale_order_items
+        WHERE sale_id=%s
+          AND qty > COALESCE(kot_printed_qty, 0)
+        ORDER BY id
+        """,
+        (sale_id,),
+    )
+    return cursor.fetchall()
+
+
+def _prepare_pending_kot_print(
+    cursor,
+    summary: dict,
+    pending_items: list[dict],
+    sender_name: str | None = None,
+):
+    token_pending_items = [
+        item for item in pending_items if _item_requires_kot(item)
+    ]
+    grouped_items = _group_pending_kot_items(cursor, token_pending_items)
+    system_printed = False
+
+    if token_pending_items and grouped_items:
+        normalized_sender = _sanitize_thermal_text(sender_name) or "STAFF"
+
+        for group in grouped_items:
+            print_result = _send_bytes_to_printer(
+                group["printer_target"],
+                _build_token_print_payload(
+                    summary["table_name"] or f"TABLE {summary['table_id']}",
+                    summary.get("order_number") or _build_order_number(summary["id"]),
+                    summary.get("updated_at") or datetime.now(),
+                    normalized_sender,
+                    group["items"],
+                ),
+            )
+
+            if print_result.get("error"):
+                return print_result
+
+        system_printed = True
+    elif not token_pending_items:
+        system_printed = True
+
+    return {
+        "token_pending_items": token_pending_items,
+        "printer_groups": grouped_items,
+        "system_printed": system_printed,
+    }
+
+
 def get_open_sales():
     db = get_db()
     _ensure_sales_tables(db)
@@ -2815,7 +2975,10 @@ def get_sales_reports(
             f"""
             SELECT
                 COUNT(*) AS cash_entry_count,
-                COALESCE(SUM(scc.cash_in_hand), 0) AS total_cash_in_hand
+                COALESCE(SUM(scc.cash_in_hand), 0) AS total_cash_in_hand,
+                COALESCE(SUM(scc.entered_cash), 0) AS total_entered_cash,
+                COALESCE(SUM(scc.entered_upi), 0) AS total_entered_upi,
+                COALESCE(SUM(scc.entered_card), 0) AS total_entered_card
             FROM sale_cash_closing scc
             WHERE {cash_closing_where_clause}
             """,
@@ -2827,16 +2990,62 @@ def get_sales_reports(
             _decimal_to_float(cash_closing_summary_row.get("total_cash_in_hand")) or 0,
             2,
         )
+        total_entered_cash = round(
+            _decimal_to_float(cash_closing_summary_row.get("total_entered_cash")) or 0,
+            2,
+        )
+        total_entered_upi = round(
+            _decimal_to_float(cash_closing_summary_row.get("total_entered_upi")) or 0,
+            2,
+        )
+        total_entered_card = round(
+            _decimal_to_float(cash_closing_summary_row.get("total_entered_card")) or 0,
+            2,
+        )
+        total_entered_amount = round(
+            total_entered_cash + total_entered_upi + total_entered_card,
+            2,
+        )
+        if total_entered_amount <= 0 and total_cash_in_hand > 0:
+            total_entered_cash = total_cash_in_hand
+            total_entered_amount = total_cash_in_hand
+
+        close_cash_sales_filters = ["sb.is_deleted = 0"]
+        close_cash_sales_params = []
+
+        if parsed_date_from is not None:
+            close_cash_sales_filters.append("sb.created_at >= %s")
+            close_cash_sales_params.append(
+                parsed_date_from.strftime("%Y-%m-%d %H:%M:%S")
+            )
+
+        if parsed_date_to is not None:
+            close_cash_sales_filters.append("sb.created_at <= %s")
+            close_cash_sales_params.append(parsed_date_to.strftime("%Y-%m-%d %H:%M:%S"))
+
+        close_cash_sales_where_clause = " AND ".join(close_cash_sales_filters)
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(sb.total), 0) AS total_sales
+            FROM sale_bills sb
+            WHERE {close_cash_sales_where_clause}
+            """,
+            tuple(close_cash_sales_params),
+        )
+        close_cash_sales_row = cursor.fetchone() or {}
+        close_cash_total_sales = round(
+            _decimal_to_float(close_cash_sales_row.get("total_sales")) or 0,
+            2,
+        )
         expected_cash_after_expense = round(
-            total_sales
-            - total_expense
-            - round(total_upi_paid, 2)
-            - round(total_card_paid, 2),
+            close_cash_total_sales - total_expense,
             2,
         )
         cash_tally_difference = (
             round(
-                expected_cash_after_expense - total_cash_in_hand,
+                close_cash_total_sales
+                - total_expense
+                - total_entered_amount,
                 2,
             )
             if cash_entry_count > 0
@@ -2908,7 +3117,14 @@ def get_sales_reports(
                 "total_expense": total_expense,
                 "expense_count": int(expense_summary_row.get("total_expenses") or 0),
                 "total_cash_in_hand": total_cash_in_hand,
+                "total_entered_cash": total_entered_cash,
+                "total_entered_upi": total_entered_upi,
+                "total_entered_card": total_entered_card,
+                "total_entered_amount": total_entered_amount,
                 "cash_closing_count": cash_entry_count,
+                "close_cash_total_sales": close_cash_total_sales,
+                "close_cash_difference": cash_tally_difference,
+                "close_cash_status": cash_tally_status,
                 "cash_tally_difference": cash_tally_difference,
                 "cash_tally_status": cash_tally_status,
                 "expected_cash_after_expense": expected_cash_after_expense,
@@ -3020,6 +3236,7 @@ def get_sale_expenses(expense_date: str | None = None):
             tuple(expense_params),
         )
         summary_row = cursor.fetchone() or {}
+        total_sales_for_date = _get_total_sales_for_business_date(cursor, selected_date)
 
         cursor.execute(
             f"""
@@ -3058,20 +3275,7 @@ def get_sale_expenses(expense_date: str | None = None):
         )
         detail_rows = cursor.fetchall()
 
-        cursor.execute(
-            """
-            SELECT
-                business_date,
-                cash_in_hand,
-                updated_by_user_id,
-                updated_by_username,
-                updated_at
-            FROM sale_cash_closing
-            WHERE business_date=%s
-            """,
-            (selected_date.isoformat(),),
-        )
-        cash_closing_row = cursor.fetchone()
+        cash_closing_row = _read_cash_closing_row_for_date(cursor, selected_date)
 
         return {
             "expense_date": selected_date.isoformat(),
@@ -3081,13 +3285,21 @@ def get_sale_expenses(expense_date: str | None = None):
                     _decimal_to_float(summary_row.get("total_amount")) or 0,
                     2,
                 ),
+                "total_sales": total_sales_for_date,
             },
             "detail_options": [
                 row.get("details")
                 for row in detail_rows
                 if (row.get("details") or "").strip()
             ],
-            "cash_closing": _serialize_sale_cash_closing_row(cash_closing_row),
+            "cash_closing": _serialize_sale_cash_closing_row(
+                cash_closing_row,
+                total_sales=total_sales_for_date,
+                total_expense=round(
+                    _decimal_to_float(summary_row.get("total_amount")) or 0,
+                    2,
+                ),
+            ),
             "rows": [_serialize_sale_expense_row(row) for row in rows],
         }
     finally:
@@ -3198,13 +3410,36 @@ def save_sale_cash_closing(payload: SaleCashClosingSaveRequest):
             getattr(payload, "actor_username", None)
         )
         actor_role = _normalize_actor_role(getattr(payload, "actor_role", None))
-        cash_in_hand = _normalize_customer_paid(payload.cash_in_hand)
+        entered_cash = _normalize_customer_paid(getattr(payload, "entered_cash", 0) or 0)
+        entered_upi = _normalize_customer_paid(getattr(payload, "entered_upi", 0) or 0)
+        entered_card = _normalize_customer_paid(getattr(payload, "entered_card", 0) or 0)
+        legacy_cash_in_hand = _normalize_customer_paid(getattr(payload, "cash_in_hand", None))
 
         if business_date is None:
             return {"error": "Enter a valid business date"}
 
-        if cash_in_hand is None:
-            return {"error": "Enter a valid cash in hand amount"}
+        if entered_cash is None:
+            return {"error": "Enter a valid cash amount"}
+
+        if entered_upi is None:
+            return {"error": "Enter a valid UPI amount"}
+
+        if entered_card is None:
+            return {"error": "Enter a valid card amount"}
+
+        if (
+            getattr(payload, "entered_cash", None) is None
+            and getattr(payload, "entered_upi", None) is None
+            and getattr(payload, "entered_card", None) is None
+        ):
+            if legacy_cash_in_hand is None:
+                return {"error": "Enter valid close-cash amounts"}
+
+            entered_cash = legacy_cash_in_hand
+            entered_upi = 0
+            entered_card = 0
+
+        cash_in_hand = round(entered_cash + entered_upi + entered_card, 2)
 
         existing_closing_row = _read_cash_closing_row_for_date(cursor, business_date)
 
@@ -3218,6 +3453,9 @@ def save_sale_cash_closing(payload: SaleCashClosingSaveRequest):
             INSERT INTO sale_cash_closing (
                 business_date,
                 cash_in_hand,
+                entered_cash,
+                entered_upi,
+                entered_card,
                 is_closed,
                 closed_at,
                 closed_by_user_id,
@@ -3225,9 +3463,12 @@ def save_sale_cash_closing(payload: SaleCashClosingSaveRequest):
                 updated_by_user_id,
                 updated_by_username
             )
-            VALUES (%s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 cash_in_hand=VALUES(cash_in_hand),
+                entered_cash=VALUES(entered_cash),
+                entered_upi=VALUES(entered_upi),
+                entered_card=VALUES(entered_card),
                 is_closed=VALUES(is_closed),
                 closed_at=COALESCE(sale_cash_closing.closed_at, CURRENT_TIMESTAMP),
                 closed_by_user_id=VALUES(closed_by_user_id),
@@ -3238,6 +3479,9 @@ def save_sale_cash_closing(payload: SaleCashClosingSaveRequest):
             (
                 business_date.isoformat(),
                 cash_in_hand,
+                entered_cash,
+                entered_upi,
+                entered_card,
                 1,
                 actor_user_id,
                 actor_username,
@@ -3250,7 +3494,24 @@ def save_sale_cash_closing(payload: SaleCashClosingSaveRequest):
         cursor.close()
         cursor = db.cursor(dictionary=True)
         closing_row = _read_cash_closing_row_for_date(cursor, business_date)
-        response_payload = _serialize_sale_cash_closing_row(closing_row)
+        total_sales_for_date = _get_total_sales_for_business_date(cursor, business_date)
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(amount), 0) AS total_amount
+            FROM sale_expenses
+            WHERE expense_date=%s
+            """,
+            (business_date.isoformat(),),
+        )
+        expense_summary_row = cursor.fetchone() or {}
+        response_payload = _serialize_sale_cash_closing_row(
+            closing_row,
+            total_sales=total_sales_for_date,
+            total_expense=round(
+                _decimal_to_float(expense_summary_row.get("total_amount")) or 0,
+                2,
+            ),
+        )
         response_payload["message"] = "Cash closed successfully"
 
         date_from, date_to = _build_cash_close_report_window(business_date)
@@ -3810,6 +4071,35 @@ def checkout_sale_for_table(table_id: int, payload: SaleCheckoutRequest):
             order_number = sale_row.get("order_number") or _build_order_number(
                 sale_row["id"],
             )
+
+        if sale_row and _is_auto_kot_enabled(cursor):
+            summary = _get_sale_summary(cursor, table_id)
+            pending_items = _read_pending_kot_items(cursor, sale_row["id"])
+            auto_kot_result = _prepare_pending_kot_print(
+                cursor,
+                summary,
+                pending_items,
+                sender_name=getattr(payload, "actor_username", None)
+                or getattr(payload, "actor_role", None)
+                or "BILLING",
+            )
+
+            if auto_kot_result.get("error"):
+                return auto_kot_result
+
+            token_pending_items = auto_kot_result["token_pending_items"]
+
+            if token_pending_items:
+                cursor.close()
+                cursor = db.cursor()
+                cursor.executemany(
+                    "UPDATE sale_order_items SET kot_printed_qty = qty WHERE id=%s",
+                    [(item["id"],) for item in token_pending_items],
+                )
+                db.commit()
+                publish_table_sale_event(table_id, "kot")
+                cursor.close()
+                cursor = db.cursor(dictionary=True)
 
         stock_deltas = _build_stock_quantity_deltas([], items)
 
@@ -4625,55 +4915,24 @@ def print_pending_kot_for_table(table_id: int, sender_name: str | None = None):
         if not summary:
             return {"error": "No order found on this table"}
 
-        cursor.execute(
-            """
-            SELECT
-                id,
-                item_name,
-                qty,
-                tax_mode,
-                printer_name,
-                printer_target,
-                COALESCE(kot_printed_qty, 0) AS kot_printed_qty
-            FROM sale_order_items
-            WHERE sale_id=%s
-              AND qty > COALESCE(kot_printed_qty, 0)
-            ORDER BY id
-            """,
-            (summary["id"],),
-        )
-        pending_items = cursor.fetchall()
+        pending_items = _read_pending_kot_items(cursor, summary["id"])
 
         if not pending_items:
             return {"error": "No new items for KOT"}
 
-        token_pending_items = [
-            item for item in pending_items if _item_requires_kot(item)
-        ]
-        grouped_items = _group_pending_kot_items(cursor, token_pending_items)
-        system_printed = False
+        prepared_kot = _prepare_pending_kot_print(
+            cursor,
+            summary,
+            pending_items,
+            sender_name=sender_name,
+        )
 
-        if token_pending_items and grouped_items:
-            normalized_sender = _sanitize_thermal_text(sender_name) or "STAFF"
+        if prepared_kot.get("error"):
+            return prepared_kot
 
-            for group in grouped_items:
-                print_result = _send_bytes_to_printer(
-                    group["printer_target"],
-                    _build_token_print_payload(
-                        summary["table_name"] or f"TABLE {table_id}",
-                        summary.get("order_number") or _build_order_number(summary["id"]),
-                        summary.get("updated_at") or datetime.now(),
-                        normalized_sender,
-                        group["items"],
-                    ),
-                )
-
-                if print_result.get("error"):
-                    return print_result
-
-            system_printed = True
-        elif not token_pending_items:
-            system_printed = True
+        token_pending_items = prepared_kot["token_pending_items"]
+        grouped_items = prepared_kot["printer_groups"]
+        system_printed = prepared_kot["system_printed"]
 
         cursor.executemany(
             "UPDATE sale_order_items SET kot_printed_qty = qty WHERE id=%s",

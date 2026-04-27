@@ -25,6 +25,11 @@ import {
 } from "../lib/accessControl";
 import { API, apiUrl } from "../lib/api";
 import {
+  normalizeReceiptSettings,
+  readStoredReceiptSettings,
+  writeStoredReceiptSettings,
+} from "../lib/receiptSettings";
+import {
   clearSaleDraft,
   readSaleDraft,
   writeSaleDraft,
@@ -165,6 +170,20 @@ function buildCartKey(item) {
   }
 
   return `name-${item.item_name || item.name}${ownerSegment}`;
+}
+
+function buildCartLineIdentity(item) {
+  const ownerSegment = item?.created_by_user_id
+    ? `-owner-${item.created_by_user_id}`
+    : item?.created_by_username
+      ? `-owner-${String(item.created_by_username).trim().toLowerCase()}`
+      : "";
+
+  if (item?.product_id) {
+    return `product-${item.product_id}${ownerSegment}`;
+  }
+
+  return `name-${item?.item_name || item?.name || ""}${ownerSegment}`;
 }
 
 function requiresKitchenToken(item) {
@@ -362,11 +381,46 @@ export default function WaiterOrderPage() {
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState("");
   const [autosaveStatus, setAutosaveStatus] = useState("idle");
+  const [autoKotEnabled, setAutoKotEnabled] = useState(() =>
+    Boolean(readStoredReceiptSettings().auto_kot_enabled),
+  );
   const currentOrderRef = useRef(null);
   const liveSyncActionRef = useRef(() => {});
   const hasLoadedSaleRef = useRef(false);
   const skipAutosaveRef = useRef(false);
   const lastSavedSignatureRef = useRef("");
+  const cartRef = useRef([]);
+
+  const setCartState = (nextValue) => {
+    setCart((currentCart) => {
+      const resolvedCart =
+        typeof nextValue === "function" ? nextValue(currentCart) : nextValue;
+      cartRef.current = resolvedCart;
+      return resolvedCart;
+    });
+  };
+
+  const syncSharedReceiptSettings = (rawSettings) => {
+    const normalizedSettings = normalizeReceiptSettings(rawSettings);
+    setAutoKotEnabled(Boolean(normalizedSettings.auto_kot_enabled));
+    writeStoredReceiptSettings(normalizedSettings);
+    return normalizedSettings;
+  };
+
+  const loadSharedReceiptSettings = async (options = {}) => {
+    const { silent = false } = options;
+
+    try {
+      const response = await axios.get(`${API}/stock/receipt-settings`);
+      return syncSharedReceiptSettings(response.data);
+    } catch (error) {
+      if (!silent) {
+        console.error(error);
+      }
+
+      return syncSharedReceiptSettings(readStoredReceiptSettings());
+    }
+  };
 
   const buildPayloadFromValues = (items) => ({
     items: items.map((item) => ({
@@ -480,6 +534,7 @@ export default function WaiterOrderPage() {
     skipAutosaveRef.current = true;
     hasLoadedSaleRef.current = true;
     lastSavedSignatureRef.current = buildPayloadSignature(savedItems);
+    cartRef.current = savedItems;
     startTransition(() => {
       setCart(savedItems);
       applySaleMeta(saleData);
@@ -566,6 +621,8 @@ export default function WaiterOrderPage() {
           setTableInfo(matchedTable);
         }
       });
+
+      await loadSharedReceiptSettings({ silent: true });
 
       const refreshedSale = await refreshOrderSale({
         silent: true,
@@ -676,15 +733,16 @@ export default function WaiterOrderPage() {
     }
 
     const nextItem = mapProductToCartItem(product, currentUser);
+    const nextItemIdentity = buildCartLineIdentity(nextItem);
 
-    setCart((currentCart) => {
+    setCartState((currentCart) => {
       const existingItem = currentCart.find(
-        (item) => item.cartKey === nextItem.cartKey,
+        (item) => buildCartLineIdentity(item) === nextItemIdentity,
       );
 
       if (existingItem) {
         return currentCart.map((item) =>
-          item.cartKey === nextItem.cartKey
+          item.cartKey === existingItem.cartKey
             ? {
                 ...item,
                 qty: item.qty + 1,
@@ -701,10 +759,11 @@ export default function WaiterOrderPage() {
 
       return [...currentCart, nextItem];
     });
+
   };
 
   const setCartItemQuantity = (itemKey, qty) => {
-    setCart((currentCart) =>
+    setCartState((currentCart) =>
       currentCart.flatMap((item) => {
         if (item.cartKey !== itemKey) {
           return [item];
@@ -749,6 +808,7 @@ export default function WaiterOrderPage() {
     }
 
     setCartItemQuantity(itemKey, currentItem.qty + change);
+
   };
 
   const removeLine = (item) => {
@@ -762,7 +822,7 @@ export default function WaiterOrderPage() {
       return;
     }
 
-    setCart((currentCart) =>
+    setCartState((currentCart) =>
       currentCart.filter((cartItem) => cartItem.cartKey !== item.cartKey),
     );
   };
@@ -811,7 +871,10 @@ export default function WaiterOrderPage() {
   };
 
   const persistSale = async (actionLabel, options = {}) => {
-    const payload = buildPayloadFromValues(cart);
+    const workingCart = Array.isArray(options.itemsOverride)
+      ? options.itemsOverride
+      : cartRef.current;
+    const payload = buildPayloadFromValues(workingCart);
     const payloadSignature = JSON.stringify(payload);
 
     try {
@@ -848,7 +911,7 @@ export default function WaiterOrderPage() {
       console.error(error);
       setAutosaveStatus("error");
       writeLocalDraft(
-        cart,
+        workingCart,
         currentTableRecord || location.state?.table || tableInfo,
         {
           pendingSync: true,
@@ -947,6 +1010,24 @@ export default function WaiterOrderPage() {
       return undefined;
     }
 
+    const syncSettings = () => {
+      loadSharedReceiptSettings({ silent: true });
+    };
+
+    const intervalId = window.setInterval(syncSettings, 15000);
+    window.addEventListener("focus", syncSettings);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", syncSettings);
+    };
+  }, [loading]);
+
+  useEffect(() => {
+    if (loading) {
+      return undefined;
+    }
+
     const syncOrderFromServer = () => liveSyncActionRef.current();
 
     const intervalId = window.setInterval(syncOrderFromServer, 4000);
@@ -1002,19 +1083,24 @@ export default function WaiterOrderPage() {
   };
 
   const printKitchenOrderTicket = async (manual = true) => {
-    if (!permissions.printKitchenTicket) {
+    if (manual && !permissions.printKitchenTicket) {
       alert("You do not have permission to print token");
       return;
     }
 
-    if (cart.length === 0) {
+    const workingCart = cartRef.current;
+
+    if (workingCart.length === 0) {
       if (manual) {
         alert("Add items before printing token");
       }
       return;
     }
 
-    const savedSale = await persistSale("kitchen", { showMessage: false });
+    const savedSale = await persistSale("kitchen", {
+      showMessage: false,
+      itemsOverride: workingCart,
+    });
 
     if (!savedSale || savedSale.error) {
       return;
@@ -1043,7 +1129,7 @@ export default function WaiterOrderPage() {
         return;
       }
 
-      setCart((currentCart) =>
+      setCartState((currentCart) =>
         currentCart.map((item) =>
           requiresKitchenToken(item)
             ? {

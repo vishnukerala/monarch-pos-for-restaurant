@@ -28,7 +28,11 @@ import {
   isLineOwnedByUser,
 } from "../lib/accessControl";
 import { API, apiUrl } from "../lib/api";
-import { readStoredReceiptSettings } from "../lib/receiptSettings";
+import {
+  normalizeReceiptSettings,
+  readStoredReceiptSettings,
+  writeStoredReceiptSettings,
+} from "../lib/receiptSettings";
 import {
   clearSaleDraft,
   readSaleDraft,
@@ -314,6 +318,20 @@ function buildCartKey(item) {
   }
 
   return `name-${item.item_name || item.name}${ownerSegment}`;
+}
+
+function buildCartSelectionIdentity(item) {
+  const ownerSegment = item?.created_by_user_id
+    ? `-owner-${item.created_by_user_id}`
+    : item?.created_by_username
+      ? `-owner-${String(item.created_by_username).trim().toLowerCase()}`
+      : "";
+
+  if (item?.product_id) {
+    return `product-${item.product_id}${ownerSegment}`;
+  }
+
+  return `name-${item?.item_name || item?.name || ""}${ownerSegment}`;
 }
 
 function getOrderStatusLabel(status) {
@@ -859,6 +877,7 @@ export default function BillingPage() {
   const location = useLocation();
   const { tableId } = useParams();
   const cashGivenInputRef = useRef(null);
+  const selectedCartItemIdentityRef = useRef("");
   const liveSyncActionRef = useRef(() => {});
   const [tableInfo, setTableInfo] = useState(location.state?.table || null);
   const [tables, setTables] = useState([]);
@@ -882,9 +901,13 @@ export default function BillingPage() {
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState("");
   const [autosaveStatus, setAutosaveStatus] = useState("idle");
-  const [autoKotEnabled, setAutoKotEnabled] = useState(
-    () => localStorage.getItem("auto_kot_enabled") === "1",
+  const [sharedReceiptSettings, setSharedReceiptSettings] = useState(() =>
+    readStoredReceiptSettings(),
   );
+  const [autoKotEnabled, setAutoKotEnabled] = useState(() =>
+    Boolean(readStoredReceiptSettings().auto_kot_enabled),
+  );
+  const [autoKotSaveState, setAutoKotSaveState] = useState("idle");
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
   const [billPrintEnabled, setBillPrintEnabled] = useState(true);
   const [showChangeDialog, setShowChangeDialog] = useState(false);
@@ -901,10 +924,33 @@ export default function BillingPage() {
   const [splitMode, setSplitMode] = useState("item");
   const [splitAmountInput, setSplitAmountInput] = useState("");
   const [splitSelectedKeys, setSplitSelectedKeys] = useState([]);
-  const [autoKotTrigger, setAutoKotTrigger] = useState(0);
   const hasLoadedSaleRef = useRef(false);
   const skipAutosaveRef = useRef(false);
   const lastSavedSignatureRef = useRef("");
+  const persistenceEpochRef = useRef(0);
+
+  const syncSharedReceiptSettings = (rawSettings) => {
+    const normalizedSettings = normalizeReceiptSettings(rawSettings);
+    setSharedReceiptSettings(normalizedSettings);
+    setAutoKotEnabled(Boolean(normalizedSettings.auto_kot_enabled));
+    writeStoredReceiptSettings(normalizedSettings);
+    return normalizedSettings;
+  };
+
+  const loadSharedReceiptSettings = async (options = {}) => {
+    const { silent = false } = options;
+
+    try {
+      const response = await axios.get(`${API}/stock/receipt-settings`);
+      return syncSharedReceiptSettings(response.data);
+    } catch (error) {
+      if (!silent) {
+        console.error(error);
+      }
+
+      return syncSharedReceiptSettings(readStoredReceiptSettings());
+    }
+  };
 
   const focusCashGivenInput = () => {
     window.requestAnimationFrame(() => {
@@ -1077,6 +1123,18 @@ export default function BillingPage() {
           return currentValue;
         }
 
+        const selectedIdentity = selectedCartItemIdentityRef.current;
+
+        if (selectedIdentity) {
+          const matchedItem = savedItems.find(
+            (item) => buildCartSelectionIdentity(item) === selectedIdentity,
+          );
+
+          if (matchedItem) {
+            return matchedItem.cartKey;
+          }
+        }
+
         return savedItems[0]?.cartKey || null;
       });
       setCustomerPaidInput(
@@ -1195,6 +1253,8 @@ export default function BillingPage() {
         }
       });
 
+      await loadSharedReceiptSettings({ silent: true });
+
       const refreshedSale = await refreshBillingSale({
         silent: true,
         fallbackToLocal: true,
@@ -1247,6 +1307,7 @@ export default function BillingPage() {
 
   useEffect(() => {
     if (cart.length === 0) {
+      selectedCartItemIdentityRef.current = "";
       if (selectedCartItemId !== null) {
         setSelectedCartItemId(null);
       }
@@ -1257,9 +1318,24 @@ export default function BillingPage() {
       (item) => item.cartKey === selectedCartItemId,
     );
 
-    if (!hasSelectedItem) {
-      setSelectedCartItemId(cart[0].cartKey);
+    if (hasSelectedItem) {
+      return;
     }
+
+    const selectedIdentity = selectedCartItemIdentityRef.current;
+
+    if (selectedIdentity) {
+      const matchedItem = cart.find(
+        (item) => buildCartSelectionIdentity(item) === selectedIdentity,
+      );
+
+      if (matchedItem) {
+        setSelectedCartItemId(matchedItem.cartKey);
+        return;
+      }
+    }
+
+    setSelectedCartItemId(cart[0].cartKey);
   }, [cart, selectedCartItemId]);
 
   const deferredSearch = useDeferredValue(search);
@@ -1278,6 +1354,12 @@ export default function BillingPage() {
 
   const selectedCartItem =
     cart.find((item) => item.cartKey === selectedCartItemId) || null;
+
+  useEffect(() => {
+    selectedCartItemIdentityRef.current = selectedCartItem
+      ? buildCartSelectionIdentity(selectedCartItem)
+      : "";
+  }, [selectedCartItem]);
   const getPrintedTokenQty = (item) => Number(item?.kot_printed_qty || 0);
   const hasPrintedTokenLock = (item) => getPrintedTokenQty(item) > 0;
   const getPrintedTokenLockMessage = (item) =>
@@ -1303,8 +1385,60 @@ export default function BillingPage() {
   const showCatalog = permissions.addItems;
 
   useEffect(() => {
-    localStorage.setItem("auto_kot_enabled", autoKotEnabled ? "1" : "0");
-  }, [autoKotEnabled]);
+    if (loading) {
+      return undefined;
+    }
+
+    const syncSettings = () => {
+      loadSharedReceiptSettings({ silent: true });
+    };
+
+    const intervalId = window.setInterval(syncSettings, 15000);
+    window.addEventListener("focus", syncSettings);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", syncSettings);
+    };
+  }, [loading]);
+
+  const toggleAutoKotSetting = async () => {
+    if (role !== "ADMIN") {
+      alert("Only admin can change Auto KOT");
+      return;
+    }
+
+    if (autoKotSaveState === "saving") {
+      return;
+    }
+
+    const previousSettings = sharedReceiptSettings;
+    const nextSettings = normalizeReceiptSettings({
+      ...sharedReceiptSettings,
+      auto_kot_enabled: !autoKotEnabled,
+    });
+
+    syncSharedReceiptSettings(nextSettings);
+    setAutoKotSaveState("saving");
+
+    try {
+      const response = await axios.put(`${API}/stock/receipt-settings`, nextSettings);
+
+      if (response.data?.error) {
+        throw new Error(response.data.error);
+      }
+
+      syncSharedReceiptSettings(response.data?.settings || nextSettings);
+      setAutoKotSaveState("saved");
+      window.setTimeout(() => {
+        setAutoKotSaveState("idle");
+      }, 1200);
+    } catch (error) {
+      syncSharedReceiptSettings(previousSettings);
+      setAutoKotSaveState("idle");
+      alert(getRequestErrorMessage(error, "Failed to update Auto KOT"));
+    }
+  };
 
   const addToCart = (product) => {
     if (!permissions.addItems) {
@@ -1314,16 +1448,22 @@ export default function BillingPage() {
 
     const quantityToAdd = getCalculatorStepValue();
     const nextItem = mapProductToCartItem(product, currentUser);
-    setSelectedCartItemId(nextItem.cartKey);
+    const nextItemIdentity = buildCartSelectionIdentity(nextItem);
 
     setCart((currentCart) => {
       const existingItem = currentCart.find(
-        (item) => item.cartKey === nextItem.cartKey,
+        (item) => buildCartSelectionIdentity(item) === nextItemIdentity,
       );
 
       if (existingItem) {
+        setSelectedCartItemId(existingItem.cartKey);
+      } else {
+        setSelectedCartItemId(nextItem.cartKey);
+      }
+
+      if (existingItem) {
         return currentCart.map((item) =>
-          item.cartKey === nextItem.cartKey
+          item.cartKey === existingItem.cartKey
             ? {
                 ...item,
                 qty: item.qty + quantityToAdd,
@@ -1347,10 +1487,6 @@ export default function BillingPage() {
         },
       ];
     });
-
-    if (autoKotEnabled && requiresKitchenToken(nextItem)) {
-      setAutoKotTrigger((currentValue) => currentValue + 1);
-    }
 
     clearCalculatorInput();
     focusCashGivenInput();
@@ -1407,9 +1543,6 @@ export default function BillingPage() {
 
     setCartItemQuantity(itemKey, currentItem.qty + change);
 
-    if (change > 0 && autoKotEnabled && requiresKitchenToken(currentItem)) {
-      setAutoKotTrigger((currentValue) => currentValue + 1);
-    }
   };
 
   const removeSelectedLine = () => {
@@ -1450,6 +1583,7 @@ export default function BillingPage() {
     }
 
     try {
+      persistenceEpochRef.current += 1;
       setBusyAction("clear-table");
       const response = await axios.post(`${API}/sales/table/${tableId}`, {
         items: [],
@@ -1489,12 +1623,35 @@ export default function BillingPage() {
 
   const checkoutBill = async (options = {}) => {
     try {
+      persistenceEpochRef.current += 1;
       setBusyAction("checkout");
       const checkoutItems =
         Array.isArray(options.items) && options.items.length > 0
           ? options.items
           : cart;
+      const pendingKitchenUnits = checkoutItems.reduce((sum, item) => {
+        if (!requiresKitchenToken(item)) {
+          return sum;
+        }
+
+        return (
+          sum +
+          Math.max(Number(item.qty || 0) - Number(item.kot_printed_qty || 0), 0)
+        );
+      }, 0);
       const paymentBreakdown = options.paymentBreakdown || {};
+
+      if (autoKotEnabled && pendingKitchenUnits > 0) {
+        const savedSale = await persistSale("checkout-kot", {
+          showMessage: false,
+          suppressErrorAlert: false,
+        });
+
+        if (!savedSale || savedSale.error) {
+          return null;
+        }
+      }
+
       const response = await axios.post(`${API}/sales/table/${tableId}/checkout`, {
         items: buildPayloadFromValues(checkoutItems, customerPaidValue).items,
         customer_paid:
@@ -1507,6 +1664,9 @@ export default function BillingPage() {
           paymentBreakdown.cardPaid == null ? null : paymentBreakdown.cardPaid,
         upi_paid:
           paymentBreakdown.upiPaid == null ? null : paymentBreakdown.upiPaid,
+        actor_user_id: currentUser?.id ?? null,
+        actor_username: currentUser?.username || null,
+        actor_role: currentUser?.role || null,
       });
 
       if (response.data.error) {
@@ -1803,10 +1963,15 @@ export default function BillingPage() {
       : customerPaidValue;
     const payload = buildPayloadFromValues(cart, resolvedCustomerPaid);
     const payloadSignature = JSON.stringify(payload);
+    const requestEpoch = persistenceEpochRef.current;
 
     try {
       setBusyAction(actionLabel);
       const response = await axios.post(`${API}/sales/table/${tableId}`, payload);
+
+      if (requestEpoch !== persistenceEpochRef.current) {
+        return null;
+      }
 
       if (response.data.error) {
         alert(response.data.error);
@@ -1894,12 +2059,18 @@ export default function BillingPage() {
     }
 
     const timeoutId = setTimeout(async () => {
+      const requestEpoch = persistenceEpochRef.current;
+
       try {
         setAutosaveStatus("saving");
         const response = await axios.post(
           `${API}/sales/table/${tableId}`,
           buildPayloadFromValues(cart, customerPaidValue),
         );
+
+        if (requestEpoch !== persistenceEpochRef.current) {
+          return;
+        }
 
         if (response.data.error) {
           setAutosaveStatus("error");
@@ -2152,7 +2323,7 @@ export default function BillingPage() {
   };
 
   const printKitchenOrderTicket = async (manual = true) => {
-    if (!permissions.printKitchenTicket) {
+    if (manual && !permissions.printKitchenTicket) {
       if (manual) {
         alert("You do not have permission to print kitchen tickets");
       }
@@ -2255,37 +2426,6 @@ export default function BillingPage() {
       }
     }
   };
-
-  useEffect(() => {
-    if (
-      !permissions.printKitchenTicket ||
-      !permissions.toggleAutoKot ||
-      !autoKotEnabled ||
-      autoKotTrigger === 0 ||
-      loading ||
-      busyAction ||
-      movingOrder ||
-      transferringItem
-    ) {
-      return undefined;
-    }
-
-    const timeoutId = setTimeout(() => {
-      setAutoKotTrigger(0);
-      printKitchenOrderTicket(false);
-    }, 900);
-
-    return () => clearTimeout(timeoutId);
-  }, [
-    autoKotEnabled,
-    autoKotTrigger,
-    loading,
-    busyAction,
-    movingOrder,
-    transferringItem,
-    permissions.printKitchenTicket,
-    permissions.toggleAutoKot,
-  ]);
 
   const openPaymentDialog = () => {
     if (!permissions.receivePayment) {
@@ -2456,6 +2596,7 @@ export default function BillingPage() {
   const saveAndReturnToFloor = () => {
     const payloadSignature = buildPayloadSignature(cart, customerPaidValue);
     const floorViewState = buildFloorViewState();
+    const requestEpoch = persistenceEpochRef.current;
 
     writeLocalDraft(
       cart,
@@ -2474,6 +2615,10 @@ export default function BillingPage() {
     void axios
       .post(`${API}/sales/table/${tableId}`, buildPayloadFromValues(cart, customerPaidValue))
       .then((response) => {
+        if (requestEpoch !== persistenceEpochRef.current) {
+          return;
+        }
+
         if (response.data?.error) {
           console.warn("Background sale save returned an error", response.data.error);
           return;
@@ -2782,23 +2927,28 @@ export default function BillingPage() {
                 {busyAction === "clear-table" ? "Clearing..." : "Clear Table"}
               </button>
             </div>
-            {permissions.toggleAutoKot && (
-              <button
-                onClick={() => setAutoKotEnabled((currentValue) => !currentValue)}
-                className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold shadow-sm ${
-                  autoKotEnabled
-                    ? "border-amber-300 bg-amber-50 text-amber-800"
-                    : "border-slate-300 bg-white text-slate-800"
-                }`}
-              >
-                {autoKotEnabled ? (
-                  <FiToggleRight className="h-5 w-5" />
-                ) : (
-                  <FiToggleLeft className="h-5 w-5" />
-                )}
-                Auto KOT {autoKotEnabled ? "On" : "Off"}
-              </button>
-            )}
+            <button
+              onClick={toggleAutoKotSetting}
+              title={
+                role === "ADMIN"
+                  ? "Admin can enable or disable Auto KOT for all users"
+                  : "Auto KOT is controlled by admin for all users"
+              }
+              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold shadow-sm ${
+                autoKotEnabled
+                  ? "border-amber-300 bg-amber-50 text-amber-800"
+                  : "border-slate-300 bg-white text-slate-800"
+              } ${autoKotSaveState === "saving" ? "opacity-70" : ""}`}
+            >
+              {autoKotEnabled ? (
+                <FiToggleRight className="h-5 w-5" />
+              ) : (
+                <FiToggleLeft className="h-5 w-5" />
+              )}
+              {autoKotSaveState === "saving"
+                ? "Saving..."
+                : `Auto KOT ${autoKotEnabled ? "On" : "Off"}`}
+            </button>
           </div>
         </div>
       </div>

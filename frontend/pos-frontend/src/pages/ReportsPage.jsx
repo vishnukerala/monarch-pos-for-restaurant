@@ -106,7 +106,14 @@ function createEmptyReportData() {
         total_expense: 0,
         expense_count: 0,
         total_cash_in_hand: 0,
+        total_entered_cash: 0,
+        total_entered_upi: 0,
+        total_entered_card: 0,
+        total_entered_amount: 0,
         cash_closing_count: 0,
+        close_cash_total_sales: 0,
+        close_cash_difference: null,
+        close_cash_status: "PENDING",
         cash_tally_difference: null,
         cash_tally_status: "PENDING",
         expected_cash_after_expense: 0,
@@ -154,6 +161,83 @@ function getErrorMessage(error, fallbackMessage) {
   }
 
   return fallbackMessage;
+}
+
+function getCloseCashReportSummary(summary) {
+  const totalSale = Number(
+    summary?.close_cash_total_sales ?? summary?.total_sales ?? 0,
+  );
+  const totalExpense = Number(summary?.total_expense || 0);
+  const enteredCash = Number(summary?.total_entered_cash || 0);
+  const enteredUpi = Number(summary?.total_entered_upi || 0);
+  const enteredCard = Number(summary?.total_entered_card || 0);
+  const enteredTotal = Number(
+    summary?.total_entered_amount || enteredCash + enteredUpi + enteredCard,
+  );
+  const closeCashCount = Number(summary?.cash_closing_count || 0);
+  const difference = Number(
+    summary?.close_cash_difference ??
+      summary?.cash_tally_difference ??
+      totalSale - totalExpense - enteredTotal,
+  );
+  const status = String(
+    summary?.close_cash_status || summary?.cash_tally_status || "PENDING",
+  ).toUpperCase();
+  const hasCloseCashEntry = closeCashCount > 0 || enteredTotal > 0;
+
+  if (!hasCloseCashEntry || status === "PENDING") {
+    return {
+      totalSale,
+      totalExpense,
+      enteredCash,
+      enteredUpi,
+      enteredCard,
+      difference,
+      label: "Pending",
+      helper: "No manual close cash entry saved for the selected date range.",
+      tone: "muted",
+    };
+  }
+
+  if (Math.abs(difference) < 0.01 || status === "TALLY") {
+    return {
+      totalSale,
+      totalExpense,
+      enteredCash,
+      enteredUpi,
+      enteredCard,
+      difference: 0,
+      label: "No Due",
+      helper: "Manual close cash entry matches the expected sale total.",
+      tone: "success",
+    };
+  }
+
+  if (difference > 0 || status === "MISSING") {
+    return {
+      totalSale,
+      totalExpense,
+      enteredCash,
+      enteredUpi,
+      enteredCard,
+      difference,
+      label: `Due: ${formatMoney(Math.abs(difference))}`,
+      helper: "Manual close cash entry is below the expected sale total.",
+      tone: "danger",
+    };
+  }
+
+  return {
+    totalSale,
+    totalExpense,
+    enteredCash,
+    enteredUpi,
+    enteredCard,
+    difference,
+    label: `Excess: ${formatMoney(Math.abs(difference))}`,
+    helper: "Manual close cash entry is above the expected sale total.",
+    tone: "warning",
+  };
 }
 
 function SummaryCard({ label, value, helper, tone = "default" }) {
@@ -628,6 +712,7 @@ export default function ReportsPage() {
   const dailySalesSummary =
     reportData.daily_sales_full?.summary ||
     createEmptyReportData().daily_sales_full.summary;
+  const closeCashSummary = getCloseCashReportSummary(dailySalesSummary);
   const dailyProfitSummary =
     reportData.daily_profit?.summary ||
     createEmptyReportData().daily_profit.summary;
@@ -1141,6 +1226,65 @@ export default function ReportsPage() {
             reportData.daily_sales_full?.daily_expenses || [],
             "No expense entries found for the selected filters.",
           )}
+        </ReportSection>
+
+        <ReportSection
+          title="Daily Sales Report - Close Cash"
+          description="Manual close cash entry with entered Cash, UPI, Card, and the final due or excess calculation."
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+            <SummaryCard
+              label="Today Total Sale"
+              value={formatMoney(closeCashSummary.totalSale)}
+              helper="Sale total used for close cash calculation."
+            />
+            <SummaryCard
+              label="Daily Expense"
+              value={formatMoney(closeCashSummary.totalExpense)}
+              helper="Saved daily expense deducted from total sale."
+            />
+            <SummaryCard
+              label="Manual Cash"
+              value={formatMoney(closeCashSummary.enteredCash)}
+              helper="Cash amount entered during close cash."
+            />
+            <SummaryCard
+              label="Manual UPI"
+              value={formatMoney(closeCashSummary.enteredUpi)}
+              helper="UPI amount entered during close cash."
+            />
+            <SummaryCard
+              label="Manual Card"
+              value={formatMoney(closeCashSummary.enteredCard)}
+              helper="Card amount entered during close cash."
+            />
+          </div>
+
+          <div className="mt-5 grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="rounded-[24px] border border-slate-200 bg-slate-50/80 p-5">
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                Calculation
+              </div>
+              <div className="mt-3 text-lg font-bold text-slate-900">
+                {formatMoney(closeCashSummary.totalSale)} -{" "}
+                {formatMoney(closeCashSummary.totalExpense)} -{" "}
+                {formatMoney(closeCashSummary.enteredCash)} -{" "}
+                {formatMoney(closeCashSummary.enteredUpi)} -{" "}
+                {formatMoney(closeCashSummary.enteredCard)} ={" "}
+                {formatMoney(closeCashSummary.difference)}
+              </div>
+              <div className="mt-2 text-sm text-slate-500">
+                Total Sale - Daily Expense - Cash - UPI - Card
+              </div>
+            </div>
+
+            <SummaryCard
+              label="Close Cash Result"
+              value={closeCashSummary.label}
+              helper={closeCashSummary.helper}
+              tone={closeCashSummary.tone}
+            />
+          </div>
         </ReportSection>
       </div>
     );

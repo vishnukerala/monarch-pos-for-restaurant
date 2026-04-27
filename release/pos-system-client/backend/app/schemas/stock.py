@@ -24,6 +24,7 @@ class StockPrinterUpdate(BaseModel):
 
 
 class StockReceiptSettingsUpdate(BaseModel):
+    auto_kot_enabled: bool = False
     title_enabled: bool = False
     details_enabled: bool = True
     title_font_size: int = 18

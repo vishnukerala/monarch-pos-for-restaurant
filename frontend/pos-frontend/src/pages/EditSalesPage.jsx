@@ -13,6 +13,11 @@ import {
 import AppSidebarLayout from "../components/AppSidebarLayout";
 import { getRolePermissions, getStoredUser } from "../lib/accessControl";
 import { API } from "../lib/api";
+import {
+  buildCloseCashDraft,
+  createEmptyCashClosingData,
+  getCloseCashEntryTotals,
+} from "../lib/cashClosing";
 
 function getTodayDateValue() {
   const now = new Date();
@@ -40,6 +45,22 @@ function getErrorMessage(error, fallbackMessage) {
   }
 
   return fallbackMessage;
+}
+
+function getCloseCashResultLabel(summary, formatMoneyValue) {
+  if (!summary || summary.status === "PENDING") {
+    return "Pending";
+  }
+
+  if (summary.status === "TALLY") {
+    return "No Due";
+  }
+
+  if (summary.status === "MISSING") {
+    return `Due: ${formatMoneyValue(summary.difference)}`;
+  }
+
+  return `Excess: ${formatMoneyValue(Math.abs(summary.difference || 0))}`;
 }
 
 function formatPaymentMethod(value) {
@@ -404,20 +425,50 @@ export default function EditSalesPage() {
   const [products, setProducts] = useState([]);
   const [loadingProducts, setLoadingProducts] = useState(false);
   const [catalogUnavailable, setCatalogUnavailable] = useState(false);
-  const [cashClosingInfo, setCashClosingInfo] = useState({
-    business_date: null,
-    is_closed: false,
-    closed_at: null,
-    closed_by_username: "",
-  });
+  const [cashClosingInfo, setCashClosingInfo] = useState(
+    createEmptyCashClosingData(),
+  );
   const [loadingCashClosing, setLoadingCashClosing] = useState(false);
   const [closingCash, setClosingCash] = useState(false);
   const [showCloseCashDialog, setShowCloseCashDialog] = useState(false);
+  const [closeCashForm, setCloseCashForm] = useState(() =>
+    buildCloseCashDraft(createEmptyCashClosingData()),
+  );
   const [productSearch, setProductSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("ALL");
   const [selectedEditorItemId, setSelectedEditorItemId] = useState(null);
 
   const closeCashDate = dateTo || dateFrom || todayDate;
+  const closeCashPreview = getCloseCashEntryTotals(
+    cashClosingInfo?.total_sales,
+    cashClosingInfo?.total_expense,
+    closeCashForm,
+  );
+  const savedCloseCashSummary = getCloseCashEntryTotals(
+    cashClosingInfo?.total_sales,
+    cashClosingInfo?.total_expense,
+    {
+      enteredCash: cashClosingInfo?.entered_cash,
+      enteredUpi: cashClosingInfo?.entered_upi,
+      enteredCard: cashClosingInfo?.entered_card,
+    },
+  );
+  const savedCloseCashStatusTone =
+    savedCloseCashSummary.status === "TALLY"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : savedCloseCashSummary.status === "MISSING"
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : savedCloseCashSummary.status === "EXCESS"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-slate-200 bg-slate-50 text-slate-600";
+  const closeCashStatusTone =
+    closeCashPreview.status === "TALLY"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : closeCashPreview.status === "MISSING"
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : closeCashPreview.status === "EXCESS"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-slate-200 bg-slate-50 text-slate-600";
 
   const loadProductCatalog = async () => {
     try {
@@ -494,20 +545,19 @@ export default function EditSalesPage() {
       });
 
       setCashClosingInfo(
-        response.data?.cash_closing || {
+        {
+          ...createEmptyCashClosingData(),
           business_date: businessDate,
-          is_closed: false,
-          closed_at: null,
-          closed_by_username: "",
+          ...(response.data?.cash_closing || {}),
+          total_sales: Number(response.data?.summary?.total_sales || 0),
+          total_expense: Number(response.data?.summary?.total_amount || 0),
         },
       );
     } catch (error) {
       console.error(error);
       setCashClosingInfo({
+        ...createEmptyCashClosingData(),
         business_date: businessDate,
-        is_closed: false,
-        closed_at: null,
-        closed_by_username: "",
       });
     } finally {
       setLoadingCashClosing(false);
@@ -527,6 +577,14 @@ export default function EditSalesPage() {
   useEffect(() => {
     void loadCashClosingStatus(closeCashDate);
   }, [canManageCashClose, closeCashDate]);
+
+  useEffect(() => {
+    if (!showCloseCashDialog) {
+      return;
+    }
+
+    setCloseCashForm(buildCloseCashDraft(cashClosingInfo));
+  }, [cashClosingInfo, showCloseCashDialog]);
 
   useEffect(() => {
     if (
@@ -599,7 +657,9 @@ export default function EditSalesPage() {
       setClosingCash(true);
       const response = await axios.put(`${API}/sales/cash-closing`, {
         business_date: closeCashDate,
-        cash_in_hand: 0,
+        entered_cash: closeCashPreview.enteredCash,
+        entered_upi: closeCashPreview.enteredUpi,
+        entered_card: closeCashPreview.enteredCard,
         actor_user_id: currentUser.id,
         actor_username: currentUser.username,
         actor_role: currentUser.role,
@@ -1193,8 +1253,13 @@ export default function EditSalesPage() {
             </div>
             {canManageCashClose && (
               cashClosingInfo?.is_closed ? (
-                <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-semibold text-emerald-700">
-                  Cash closed for {cashClosingInfo.business_date || closeCashDate}
+                <div className="flex flex-wrap gap-2">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-semibold text-slate-700">
+                    Total Sale {formatMoney(cashClosingInfo.total_sales)}
+                  </div>
+                  <div className={`rounded-xl border px-4 py-3 text-sm font-semibold ${savedCloseCashStatusTone}`}>
+                    {getCloseCashResultLabel(savedCloseCashSummary, formatMoney)}
+                  </div>
                 </div>
               ) : (
                 <button
@@ -2176,6 +2241,66 @@ export default function EditSalesPage() {
               edit expenses or billed sales for this date. The Daily Sales Full
               Report will be sent automatically to the default recipients.
             </p>
+
+            <div className="mt-6 grid gap-4 md:grid-cols-3">
+              <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Cash
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={closeCashForm.enteredCash}
+                  onChange={(event) =>
+                    setCloseCashForm((currentValue) => ({
+                      ...currentValue,
+                      enteredCash: event.target.value,
+                    }))
+                  }
+                  className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                  placeholder="0.00"
+                />
+              </label>
+              <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  UPI
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={closeCashForm.enteredUpi}
+                  onChange={(event) =>
+                    setCloseCashForm((currentValue) => ({
+                      ...currentValue,
+                      enteredUpi: event.target.value,
+                    }))
+                  }
+                  className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                  placeholder="0.00"
+                />
+              </label>
+              <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Card
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={closeCashForm.enteredCard}
+                  onChange={(event) =>
+                    setCloseCashForm((currentValue) => ({
+                      ...currentValue,
+                      enteredCard: event.target.value,
+                    }))
+                  }
+                  className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                  placeholder="0.00"
+                />
+              </label>
+            </div>
 
             <div className="mt-6 grid grid-cols-2 gap-3">
               <button

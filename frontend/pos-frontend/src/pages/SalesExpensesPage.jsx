@@ -3,6 +3,11 @@ import axios from "axios";
 import AppSidebarLayout from "../components/AppSidebarLayout";
 import { getStoredUser } from "../lib/accessControl";
 import { API } from "../lib/api";
+import {
+  buildCloseCashDraft,
+  createEmptyCashClosingData,
+  getCloseCashEntryTotals,
+} from "../lib/cashClosing";
 
 function getTodayDate() {
   const now = new Date();
@@ -57,25 +62,32 @@ function getErrorMessage(error, fallbackMessage) {
   return fallbackMessage;
 }
 
+function getCloseCashResultLabel(summary, formatMoneyValue) {
+  if (!summary || summary.status === "PENDING") {
+    return "Pending";
+  }
+
+  if (summary.status === "TALLY") {
+    return "No Due";
+  }
+
+  if (summary.status === "MISSING") {
+    return `Due: ${formatMoneyValue(summary.difference)}`;
+  }
+
+  return `Excess: ${formatMoneyValue(Math.abs(summary.difference || 0))}`;
+}
+
 function createEmptyExpenseData(expenseDate) {
   return {
     expense_date: expenseDate,
     summary: {
       entry_count: 0,
       total_amount: 0,
+      total_sales: 0,
     },
     detail_options: [],
-    cash_closing: {
-      business_date: null,
-      cash_in_hand: 0,
-      is_closed: false,
-      closed_at: null,
-      closed_by_user_id: null,
-      closed_by_username: "",
-      updated_by_user_id: null,
-      updated_by_username: "",
-      updated_at: null,
-    },
+    cash_closing: createEmptyCashClosingData(),
     rows: [],
   };
 }
@@ -101,15 +113,57 @@ export default function SalesExpensesPage() {
   const [saving, setSaving] = useState(false);
   const [closingCash, setClosingCash] = useState(false);
   const [showCloseCashDialog, setShowCloseCashDialog] = useState(false);
+  const [closeCashForm, setCloseCashForm] = useState(() =>
+    buildCloseCashDraft(createEmptyCashClosingData()),
+  );
   const detailListId = useId();
   const isCashClosed = Boolean(expenseData.cash_closing?.is_closed);
   const isLockedForUser = isCashClosed && !isAdmin;
+  const savedCloseCashSummary = getCloseCashEntryTotals(
+    expenseData.summary?.total_sales,
+    expenseData.summary?.total_amount,
+    {
+      enteredCash: expenseData.cash_closing?.entered_cash,
+      enteredUpi: expenseData.cash_closing?.entered_upi,
+      enteredCard: expenseData.cash_closing?.entered_card,
+    },
+  );
+  const closeCashPreview = getCloseCashEntryTotals(
+    expenseData.summary?.total_sales,
+    expenseData.summary?.total_amount,
+    closeCashForm,
+  );
+
+  const savedCloseCashStatusTone =
+    savedCloseCashSummary.status === "TALLY"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : savedCloseCashSummary.status === "MISSING"
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : savedCloseCashSummary.status === "EXCESS"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-slate-200 bg-slate-50 text-slate-600";
+  const closeCashStatusTone =
+    closeCashPreview.status === "TALLY"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : closeCashPreview.status === "MISSING"
+        ? "border-rose-200 bg-rose-50 text-rose-700"
+        : closeCashPreview.status === "EXCESS"
+          ? "border-amber-200 bg-amber-50 text-amber-700"
+          : "border-slate-200 bg-slate-50 text-slate-600";
 
   useEffect(() => {
     if (isLockedForUser && editingExpenseId) {
       resetForm();
     }
   }, [editingExpenseId, isLockedForUser]);
+
+  useEffect(() => {
+    if (!showCloseCashDialog) {
+      return;
+    }
+
+    setCloseCashForm(buildCloseCashDraft(expenseData.cash_closing));
+  }, [expenseData.cash_closing, showCloseCashDialog]);
 
   const loadExpenses = async (expenseDate = selectedDate) => {
     try {
@@ -119,7 +173,18 @@ export default function SalesExpensesPage() {
           expense_date: expenseDate,
         },
       });
-      setExpenseData(response.data || createEmptyExpenseData(expenseDate));
+      setExpenseData({
+        ...createEmptyExpenseData(expenseDate),
+        ...(response.data || {}),
+        summary: {
+          ...createEmptyExpenseData(expenseDate).summary,
+          ...(response.data?.summary || {}),
+        },
+        cash_closing: {
+          ...createEmptyCashClosingData(),
+          ...(response.data?.cash_closing || {}),
+        },
+      });
     } catch (error) {
       console.error(error);
       alert(getErrorMessage(error, "Failed to load daily expenses"));
@@ -209,7 +274,9 @@ export default function SalesExpensesPage() {
       setClosingCash(true);
       const response = await axios.put(`${API}/sales/cash-closing`, {
         business_date: selectedDate,
-        cash_in_hand: 0,
+        entered_cash: closeCashPreview.enteredCash,
+        entered_upi: closeCashPreview.enteredUpi,
+        entered_card: closeCashPreview.enteredCard,
         actor_user_id: user.id,
         actor_username: user.username,
         actor_role: user.role,
@@ -300,6 +367,32 @@ export default function SalesExpensesPage() {
                       } on ${formatDateTime(expenseData.cash_closing?.closed_at)}`
                     : "After close, non-admin users cannot edit expenses or billed sales for this date."}
                 </div>
+                {isCashClosed && (
+                  <div className="mt-4 grid gap-3 md:grid-cols-2">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                        Total Sale
+                      </div>
+                      <div className="mt-2 text-xl font-bold text-slate-900">
+                        {formatMoney(expenseData.cash_closing?.total_sales)}
+                      </div>
+                    </div>
+                    <div className={`rounded-2xl border px-4 py-3 ${savedCloseCashStatusTone}`}>
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em]">
+                        {savedCloseCashSummary.status === "TALLY"
+                          ? "No Due"
+                          : savedCloseCashSummary.status === "MISSING"
+                            ? "Due"
+                            : savedCloseCashSummary.status === "EXCESS"
+                              ? "Excess"
+                              : savedCloseCashSummary.status}
+                      </div>
+                      <div className="mt-2 text-xl font-bold">
+                        {getCloseCashResultLabel(savedCloseCashSummary, formatMoney)}
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {isCashClosed ? (
@@ -586,6 +679,66 @@ export default function SalesExpensesPage() {
                 Sales Full Report will be sent automatically to the default
                 recipients.
               </p>
+
+              <div className="mt-6 grid gap-4 md:grid-cols-3">
+                <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Cash
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={closeCashForm.enteredCash}
+                    onChange={(event) =>
+                      setCloseCashForm((currentValue) => ({
+                        ...currentValue,
+                        enteredCash: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                    placeholder="0.00"
+                  />
+                </label>
+                <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    UPI
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={closeCashForm.enteredUpi}
+                    onChange={(event) =>
+                      setCloseCashForm((currentValue) => ({
+                        ...currentValue,
+                        enteredUpi: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                    placeholder="0.00"
+                  />
+                </label>
+                <label className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Card
+                  </div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={closeCashForm.enteredCard}
+                    onChange={(event) =>
+                      setCloseCashForm((currentValue) => ({
+                        ...currentValue,
+                        enteredCard: event.target.value,
+                      }))
+                    }
+                    className="mt-2 w-full bg-transparent text-lg font-semibold text-slate-900 outline-none"
+                    placeholder="0.00"
+                  />
+                </label>
+              </div>
 
               <div className="mt-6 grid grid-cols-2 gap-3">
                 <button

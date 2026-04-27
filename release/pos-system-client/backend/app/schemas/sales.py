@@ -27,6 +27,9 @@ class SaleCheckoutRequest(BaseModel):
     cash_paid: float | None = None
     card_paid: float | None = None
     upi_paid: float | None = None
+    actor_user_id: int | None = None
+    actor_username: str | None = None
+    actor_role: str | None = None
 
 
 class SaleBillUpdateRequest(BaseModel):
@@ -80,7 +83,10 @@ class SaleExpenseSaveRequest(BaseModel):
 
 class SaleCashClosingSaveRequest(BaseModel):
     business_date: str | None = None
-    cash_in_hand: float
+    cash_in_hand: float | None = None
+    entered_cash: float | None = None
+    entered_upi: float | None = None
+    entered_card: float | None = None
     actor_user_id: int | None = None
     actor_username: str | None = None
     actor_role: str | None = None

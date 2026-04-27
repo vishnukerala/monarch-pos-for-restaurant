@@ -955,6 +955,42 @@ def _build_report_document(
             )
         )
     elif normalized_report_type == "DAILY_SALES_FULL":
+        close_cash_total_sales = float(
+            sales_summary.get("close_cash_total_sales")
+            or sales_summary.get("total_sales")
+            or 0
+        )
+        total_entered_cash = float(sales_summary.get("total_entered_cash") or 0)
+        total_entered_upi = float(sales_summary.get("total_entered_upi") or 0)
+        total_entered_card = float(sales_summary.get("total_entered_card") or 0)
+        total_entered_amount = float(
+            sales_summary.get("total_entered_amount")
+            or (total_entered_cash + total_entered_upi + total_entered_card)
+        )
+        close_cash_difference = sales_summary.get("close_cash_difference")
+        if close_cash_difference is None:
+            close_cash_difference = close_cash_total_sales - float(
+                sales_summary.get("total_expense") or 0
+            ) - total_entered_amount
+        close_cash_difference = float(close_cash_difference or 0)
+        close_cash_status = str(
+            sales_summary.get("close_cash_status")
+            or sales_summary.get("cash_tally_status")
+            or "PENDING"
+        ).upper()
+        if (
+            int(sales_summary.get("cash_closing_count") or 0) <= 0
+            and total_entered_amount <= 0
+        ) or close_cash_status == "PENDING":
+            close_cash_result = "Pending"
+        elif abs(close_cash_difference) < 0.01 or close_cash_status == "TALLY":
+            close_cash_result = "No Due"
+            close_cash_difference = 0
+        elif close_cash_difference > 0 or close_cash_status == "MISSING":
+            close_cash_result = f"Due: {_format_money(abs(close_cash_difference))}"
+        else:
+            close_cash_result = f"Excess: {_format_money(abs(close_cash_difference))}"
+
         highlights = [
             {"label": "Total Sales", "value": _format_money(sales_summary.get("total_sales"))},
             {"label": "UPI", "value": _format_money(sales_summary.get("total_upi_paid"))},
@@ -1038,6 +1074,32 @@ def _build_report_document(
                     column_widths=[1.8, 3.8, 1.1, 1.4],
                     alignments=["left", "left", "right", "left"],
                     empty_message="No expense entries for the selected period.",
+                ),
+                make_section(
+                    "Close Cash Summary",
+                    ["Field", "Value"],
+                    [
+                        ["Today Total Sale", _format_money(close_cash_total_sales)],
+                        ["Daily Expense", _format_money(sales_summary.get("total_expense"))],
+                        ["Manual Cash", _format_money(total_entered_cash)],
+                        ["Manual UPI", _format_money(total_entered_upi)],
+                        ["Manual Card", _format_money(total_entered_card)],
+                        [
+                            "Calculation",
+                            (
+                                f"{_format_money(close_cash_total_sales)} - "
+                                f"{_format_money(sales_summary.get('total_expense'))} - "
+                                f"{_format_money(total_entered_cash)} - "
+                                f"{_format_money(total_entered_upi)} - "
+                                f"{_format_money(total_entered_card)} = "
+                                f"{_format_money(close_cash_difference)}"
+                            ),
+                        ],
+                        ["Result", close_cash_result],
+                    ],
+                    column_widths=[2.2, 4.8],
+                    alignments=["left", "left"],
+                    empty_message="No close cash data for the selected period.",
                 ),
             ]
         )

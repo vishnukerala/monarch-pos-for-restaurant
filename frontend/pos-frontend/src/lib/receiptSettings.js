@@ -1,4 +1,5 @@
 export const DEFAULT_RECEIPT_SETTINGS = {
+  auto_kot_enabled: false,
   title_enabled: false,
   details_enabled: true,
   title_font_size: 18,
@@ -122,6 +123,7 @@ function readLegacyReceiptSettings() {
 
   return {
     ...DEFAULT_RECEIPT_SETTINGS,
+    auto_kot_enabled: false,
     title_enabled: false,
     details_enabled: true,
     title_font_size: 18,
@@ -139,6 +141,7 @@ export function normalizeReceiptSettings(rawValue) {
   };
 
   return {
+    auto_kot_enabled: Boolean(baseValue.auto_kot_enabled),
     title_enabled: Boolean(baseValue.title_enabled),
     details_enabled: Boolean(baseValue.details_enabled ?? true),
     title_font_size: normalizeFontSize(baseValue.title_font_size, 18),

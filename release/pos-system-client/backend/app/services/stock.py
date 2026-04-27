@@ -55,6 +55,7 @@ def _ensure_named_index(cursor, table_name: str, index_name: str, columns: str):
 
 def _default_receipt_settings():
     return {
+        "auto_kot_enabled": False,
         "title_enabled": False,
         "details_enabled": True,
         "title_font_size": 18,
@@ -149,6 +150,7 @@ def _ensure_stock_tables(db):
             """
             CREATE TABLE IF NOT EXISTS stock_receipt_settings (
                 id INT PRIMARY KEY,
+                auto_kot_enabled TINYINT(1) NOT NULL DEFAULT 0,
                 title_enabled TINYINT(1) NOT NULL DEFAULT 0,
                 details_enabled TINYINT(1) NOT NULL DEFAULT 1,
                 title_font_size VARCHAR(20) NOT NULL DEFAULT '18',
@@ -223,6 +225,14 @@ def _ensure_stock_tables(db):
                 """
                 ALTER TABLE stock_receipt_settings
                 ADD COLUMN title_enabled TINYINT(1) NOT NULL DEFAULT 0
+                """
+            )
+
+        if "auto_kot_enabled" not in receipt_setting_columns:
+            cursor.execute(
+                """
+                ALTER TABLE stock_receipt_settings
+                ADD COLUMN auto_kot_enabled TINYINT(1) NOT NULL DEFAULT 0
                 """
             )
 
@@ -802,6 +812,7 @@ def get_receipt_settings():
         cursor.execute(
             """
             SELECT
+                auto_kot_enabled,
                 title_enabled,
                 details_enabled,
                 title_font_size,
@@ -832,6 +843,7 @@ def get_receipt_settings():
             return defaults
 
         return {
+            "auto_kot_enabled": bool(row.get("auto_kot_enabled")),
             "title_enabled": bool(row["title_enabled"]),
             "details_enabled": bool(row["details_enabled"]),
             "title_font_size": _normalize_receipt_font_size(
@@ -1308,6 +1320,7 @@ def update_receipt_settings(data: StockReceiptSettingsUpdate):
             """
             INSERT INTO stock_receipt_settings (
                 id,
+                auto_kot_enabled,
                 title_enabled,
                 details_enabled,
                 title_font_size,
@@ -1330,9 +1343,11 @@ def update_receipt_settings(data: StockReceiptSettingsUpdate):
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s
             )
             ON DUPLICATE KEY UPDATE
+                auto_kot_enabled=VALUES(auto_kot_enabled),
                 title_enabled=VALUES(title_enabled),
                 details_enabled=VALUES(details_enabled),
                 title_font_size=VALUES(title_font_size),
@@ -1355,6 +1370,7 @@ def update_receipt_settings(data: StockReceiptSettingsUpdate):
             """,
             (
                 1,
+                1 if data.auto_kot_enabled else 0,
                 1 if data.title_enabled else 0,
                 1 if data.details_enabled else 0,
                 _normalize_receipt_font_size(
